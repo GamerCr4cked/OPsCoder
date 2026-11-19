@@ -38,12 +38,16 @@ function modelFrom(item:any):ChatModel|null{
  return{id,name:typeof item.name==="string"&&item.name!==id?item.name:id,protocol,free:modelIsFree(item)};
 }
 async function fetchModels(connectionId:string){
- const row=getConnection(connectionId),key=decryptKey(row),base=apiBase(row);
- const response=await fetch(new URL("models",base+"/"),{headers:{Authorization:"Bearer "+key,Accept:"application/json"},signal:AbortSignal.timeout(20000)});
- if(!response.ok)throw new Error("Model request failed ("+response.status+"): "+(await response.text()).slice(0,500));
- const items=parseModels(await response.json());
- const discovered=items.map((item:any)=>row.provider==="opencode-zen"?modelFrom(item):({id:String(item.id??""),name:String(item.name??item.id??""),protocol:"chat-completions" as const,free:modelIsFree(item)})).filter((m:ChatModel|null):m is ChatModel=>Boolean(m&&m.id&&m.name));
+ const row=getConnection(connectionId);
  const manual=db.prepare("SELECT model_id AS id,name,protocol,free FROM connection_models WHERE connection_id=? ORDER BY created_at").all(connectionId) as {id:string;name:string;protocol:ChatModel["protocol"];free:number}[];
+ let discovered:ChatModel[]=[];
+ try{
+  const key=decryptKey(row),base=apiBase(row);
+  const response=await fetch(new URL("models",base+"/"),{headers:{Authorization:"Bearer "+key,Accept:"application/json"},signal:AbortSignal.timeout(20000)});
+  if(!response.ok)throw new Error("Model request failed ("+response.status+"): "+(await response.text()).slice(0,500));
+  const items=parseModels(await response.json());
+  discovered=items.map((item:any)=>row.provider==="opencode-zen"?modelFrom(item):({id:String(item.id??""),name:String(item.name??item.id??""),protocol:"chat-completions" as const,free:modelIsFree(item)})).filter((m:ChatModel|null):m is ChatModel=>Boolean(m&&m.id&&m.name));
+ }catch(error){if(!manual.length)throw error;}
  const merged=[...discovered];for(const item of manual){if(!merged.some(m=>m.id===item.id))merged.push({id:item.id,name:item.name,protocol:item.protocol,free:Boolean(item.free)});}
  if(!merged.length)throw new Error("The provider returned no models. You can still add a model ID manually.");
  return merged;
