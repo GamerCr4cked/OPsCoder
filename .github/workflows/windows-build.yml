@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: windows-build-${{ github.ref }}
@@ -37,10 +37,26 @@ jobs:
       - name: Create Windows installer
         run: npm run dist:win
 
-      - name: Upload installer
+      # Keep the ZIP artifact for CI diagnostics and short-term fallback.
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: OPsCoder-Windows-Installer
           path: release/*.exe
           if-no-files-found: error
           retention-days: 7
+
+      # Publish the raw EXE as a downloadable asset on the rolling
+      # continuous-build release. Pull-request builds never publish releases.
+      - name: Publish installer to GitHub Releases
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: continuous
+          name: OPsCoder — Latest Continuous Build
+          prerelease: true
+          make_latest: false
+          files: release/*.exe
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          generate_release_notes: false
