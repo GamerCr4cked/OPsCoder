@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld("opscoder", {
   list: () => ipcRenderer.invoke("connections:list"),
   add: (input: unknown) => ipcRenderer.invoke("connections:add", input),
   remove: (id: string) => ipcRenderer.invoke("connections:remove", id),
+  rename: (connectionId: string, name: string) => ipcRenderer.invoke("connections:rename", {connectionId,name}),
+  addModel: (connectionId: string, modelId: string, name?: string) => ipcRenderer.invoke("connections:add-model", {connectionId,modelId,name}),
   models: (connectionId: string) => ipcRenderer.invoke("connections:models", {connectionId}),
   setModel: (connectionId: string, modelId: string) => ipcRenderer.invoke("connections:set-model", {connectionId,modelId})
  },
