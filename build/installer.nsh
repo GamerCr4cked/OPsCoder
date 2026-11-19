@@ -1,3 +1,4 @@
+!ifndef BUILD_UNINSTALLER
 Var OPsCoderFreshInstall
 
 !macro customInit
@@ -16,3 +17,4 @@ Var OPsCoderFreshInstall
     RMDir /r "$APPDATA\opscoder"
   ${endIf}
 !macroend
+!endif
