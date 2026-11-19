@@ -15,7 +15,7 @@ const chatInput=z.object({requestId:z.string().uuid(),conversationId:z.string().
 const modelInput=z.object({connectionId:z.string().uuid()});
 const selectModelInput=z.object({connectionId:z.string().uuid(),modelId:z.string().trim().min(1).max(200)});
 type ProviderRow={id:string;provider:"opencode-zen"|"custom";base_url:string|null;protocol:string;model_id:string|null;credential:Buffer};
-type ChatModel={id:string;name:string;protocol:"chat-completions"|"responses"|"anthropic-messages";free:boolean};
+type ChatModel={id:string;name:string;protocol:"chat-completions"|"responses"|"anthropic-messages";free:boolean;baseUrl?:string};
 const zenResponses=new Set(["gpt-6-astra","gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna","gpt-5.5","gpt-5.5-pro","gpt-5.4","gpt-5.4-pro","gpt-5.4-mini","gpt-5.4-nano","gpt-5.3-codex","gpt-5.3-codex-spark","gpt-5.2","gpt-5.2-codex","gpt-5.1","gpt-5.1-codex","gpt-5.1-codex-max","gpt-5.1-codex-mini","gpt-5","gpt-5-codex","gpt-5-nano","grok-4.6","grok-4.5","grok-build-0.1","muse-spark-1.3","muse-spark-1.2","muse-spark-1.3-contributor-free"]);
 const zenAnthropic=new Set(["claude-fable-5-2","claude-fable-5-1","claude-fable-5","claude-opus-5-5","claude-opus-5","claude-opus-4-8","claude-opus-4-7","claude-opus-4-6","claude-opus-4-5","claude-sonnet-5-5","claude-sonnet-5","claude-sonnet-4-6","claude-sonnet-4-5","claude-haiku-5-5","claude-haiku-4-5","qwen3.7-max","qwen3.7-plus","qwen3.6-plus","qwen3.5-plus"]);
 const zenChat=new Set(["deepseek-v4-pro","deepseek-v4-flash","deepseek-v4-flash-vision-exp","minimax-m3","minimax-m2.7","minimax-m2.5","glm-5.3-flash","glm-5.3","glm-5.2","glm-5.1","glm-5","kimi-k2.5","kimi-k2.6","kimi-k2.7-code","kimi-k3","big-pickle","mimo-v2.5-free","ling-3.0-flash-fin-free","nemotron-3-ultra-free","nemotron-3.5-lightning-free"]);
@@ -24,35 +24,64 @@ function publicCustomBase(value:string){const url=new URL(value);if(url.protocol
 function getConnection(id:string):ProviderRow{const row=db.prepare("SELECT id,provider,base_url,protocol,model_id,credential FROM connections WHERE id=?").get(id) as ProviderRow|undefined;if(!row)throw new Error("Connection not found. Refresh Connections and select it again.");if(!safeStorage.isEncryptionAvailable())throw new Error("Secure credential storage is unavailable on this system.");return row;}
 function decryptKey(row:ProviderRow){return safeStorage.decryptString(row.credential);}
 function apiBase(row:ProviderRow){return row.provider==="opencode-zen"?"https://opencode.ai/zen/v1":publicCustomBase(row.base_url??"");}
-function parseModels(payload:any):any[]{if(Array.isArray(payload))return payload;if(Array.isArray(payload?.data))return payload.data;if(Array.isArray(payload?.models))return payload.models;return[];}
+function parseModels(payload:any):any[]{
+ if(Array.isArray(payload))return payload;
+ for(const candidate of [payload?.data,payload?.models,payload?.items,payload?.result?.data,payload?.result?.models])if(Array.isArray(candidate))return candidate;
+ const keyed=payload?.data&&typeof payload.data==="object"?payload.data:payload?.models&&typeof payload.models==="object"?payload.models:payload;
+ if(keyed&&typeof keyed==="object"){
+  const values=Object.values(keyed);
+  if(values.some((value:any)=>value&&typeof value==="object"&&(typeof value.id==="string"||typeof value.name==="string")))return values;
+  const nested=values.flatMap((value:any)=>value?.models&&typeof value.models==="object"?Object.values(value.models):[]);
+  if(nested.length)return nested;
+ }
+ return[];
+}
+function zeroPrice(value:any):boolean{return value===0||value==="0"||value==="$0"||typeof value==="string"&&/^free$/i.test(value.trim())||typeof value==="string"&&/^\$?0(?:\.0+)?$/.test(value.trim());}
 function modelIsFree(item:any):boolean{
  if(item?.free===true||item?.is_free===true||item?.free_tier===true||String(item?.tier??"").toLowerCase()==="free"||String(item?.pricing?.tier??"").toLowerCase()==="free")return true;
- const candidates=[item?.pricing,item?.cost,item?.costs,item?.prices];
- for(const candidate of candidates){if(candidate===0||candidate==="0"||candidate==="$0")return true;if(candidate&&typeof candidate==="object"){const entries=Object.entries(candidate).filter(([key,value])=>/(input|output|prompt|completion|request|response|cache|per_token)/i.test(key)&&((typeof value==="number")||(typeof value==="string"&&/^\$?0(?:\.0+)?$/.test(value))));if(entries.length&&entries.every(([,value])=>Number(String(value).replace("$",""))===0))return true;}}
- return false;
+ const inputPrice=item?.cost?.text?.input?.price??item?.cost?.input?.price??item?.pricing?.text?.input?.price??item?.pricing?.input?.price??item?.pricing?.input;
+ if(inputPrice!==undefined&&zeroPrice(inputPrice))return true;
+ const prices:any[]=[];
+ const walk=(value:any,path:string)=>{if(!value||typeof value!=="object"){if(/(price|cost|input|output|prompt|completion)/i.test(path)&&(/price|cost/i.test(path)||typeof value==="number"||typeof value==="string"))prices.push(value);return;}for(const[key,child]of Object.entries(value))walk(child,path+"."+key);};
+ walk(item?.cost??item?.pricing??item?.costs??item?.prices,"pricing");
+ return prices.length>0&&prices.every(zeroPrice);
 }
 function modelFrom(item:any):ChatModel|null{
  const id=typeof item?.id==="string"?item.id:typeof item?.name==="string"?item.name:"";if(!id)return null;
- const advertised=String(item?.protocol??item?.api_protocol??item?.api?.protocol??"").toLowerCase();
+ const api=item?.api&&typeof item.api==="object"?item.api:{};
+ const apiEntry=Object.entries(api).find(([key,value]:[string,any])=>["chat-completions","responses","messages","anthropic-messages"].includes(key)&&value&&typeof value==="object");
+ const apiProtocol=apiEntry?.[0]??"";
+ const advertised=String(item?.protocol??item?.api_protocol??item?.api?.protocol??apiProtocol).toLowerCase();
  const protocol:ChatModel["protocol"]=advertised.includes("anthropic")||advertised.includes("messages")?"anthropic-messages":advertised.includes("responses")?"responses":advertised.includes("chat")?"chat-completions":zenProtocol(id)??(id.toLowerCase().startsWith("claude-")?"anthropic-messages":id.toLowerCase().startsWith("gpt-")?"responses":"chat-completions");
- return{id,name:typeof item.name==="string"&&item.name!==id?item.name:id,protocol,free:modelIsFree(item)||id.toLowerCase().endsWith("-free")};
+ const baseUrl=apiEntry&&typeof (apiEntry[1] as any).base_url==="string"?(apiEntry[1] as any).base_url:undefined;
+ return{id,name:typeof item.name==="string"&&item.name!==id?item.name:id,protocol,free:modelIsFree(item)||id.toLowerCase().endsWith("-free"),baseUrl};
 }
 async function fetchModels(connectionId:string){
  const row=getConnection(connectionId);
  const manual=db.prepare("SELECT model_id AS id,name,protocol,free FROM connection_models WHERE connection_id=? ORDER BY created_at").all(connectionId) as {id:string;name:string;protocol:ChatModel["protocol"];free:number}[];
  let discovered:ChatModel[]=[];
  try{
-  const key=decryptKey(row),base=apiBase(row);
-  const response=await fetch(new URL("models",base+"/"),{headers:{Authorization:"Bearer "+key,Accept:"application/json"},signal:AbortSignal.timeout(20000)});
-  if(!response.ok)throw new Error("Model request failed ("+response.status+"): "+(await response.text()).slice(0,500));
-  const items=parseModels(await response.json());
-  discovered=items.map((item:any)=>row.provider==="opencode-zen"?modelFrom(item):({id:String(item.id??""),name:String(item.name??item.id??""),protocol:"chat-completions" as const,free:modelIsFree(item)})).filter((m:ChatModel|null):m is ChatModel=>Boolean(m&&m.id&&m.name));
+  const key=decryptKey(row);
+  const urls=row.provider==="opencode-zen"?["https://opencode.ai/inference/v1/models","https://opencode.ai/zen/v1/models"]:[new URL("models",apiBase(row)+"/").toString()];
+  let lastError:unknown;
+  for(const url of urls){
+   try{
+    const response=await fetch(url,{headers:{Authorization:"Bearer "+key,Accept:"application/json"},signal:AbortSignal.timeout(20000)});
+    if(!response.ok)throw new Error("Model request failed ("+response.status+"): "+(await response.text()).slice(0,500));
+    const items=parseModels(await response.json());
+    const parsed=items.map((item:any)=>modelFrom(item)).filter((m:ChatModel|null):m is ChatModel=>Boolean(m&&m.id&&m.name));
+    if(!parsed.length)throw new Error("The provider returned an empty or unsupported model catalogue.");
+    discovered=parsed;
+    break;
+   }catch(error){lastError=error;}
+  }
+  if(!discovered.length)throw lastError instanceof Error?lastError:new Error("Could not load the provider model catalogue.");
  }catch(error){if(!manual.length)throw error;}
  const merged=[...discovered];for(const item of manual){if(!merged.some(m=>m.id===item.id))merged.push({id:item.id,name:item.name,protocol:item.protocol,free:Boolean(item.free)});}
  if(!merged.length)throw new Error("The provider returned no models. You can still add a model ID manually.");
  return merged;
 }
-function endpointFor(row:ProviderRow,model:ChatModel){const path=model.protocol==="responses"?"responses":model.protocol==="anthropic-messages"?"messages":"chat/completions";return new URL(path,apiBase(row)+"/").toString();}
+function endpointFor(row:ProviderRow,model:ChatModel){const path=model.protocol==="responses"?"responses":model.protocol==="anthropic-messages"?"messages":"chat/completions";return new URL(path,(model.baseUrl??apiBase(row))+"/").toString();}
 function parseSseDelta(protocol:ChatModel["protocol"],payload:any):string{if(protocol==="chat-completions")return payload?.choices?.[0]?.delta?.content??"";if(protocol==="responses")return payload?.type==="response.output_text.delta"||payload?.type==="response.refusal.delta"?payload.delta??"":"";return payload?.type==="content_block_delta"&&payload?.delta?.type==="text_delta"?payload.delta.text??"":"";}
 async function streamProvider(event:Electron.IpcMainInvokeEvent,row:ProviderRow,model:ChatModel,key:string,messages:{role:"user"|"assistant";content:string}[],requestId:string){
  const headers:Record<string,string>={"Content-Type":"application/json","Accept":"text/event-stream"};let body:any;
@@ -82,7 +111,7 @@ ipcMain.handle("conversations:list",()=>db.prepare("SELECT id,title,created_at,u
 ipcMain.handle("conversations:create",()=>{const id=randomUUID(),now=new Date().toISOString();db.prepare("INSERT INTO conversations(id,title,created_at,updated_at) VALUES(?,?,?,?)").run(id,"New chat",now,now);return{id,title:"New chat",created_at:now,updated_at:now};});
 ipcMain.handle("messages:list",(_event,id:unknown)=>{if(typeof id!=="string"||!z.string().uuid().safeParse(id).success)throw new Error("Invalid conversation.");return db.prepare("SELECT id,role,content,connection_id,model_id,created_at FROM messages WHERE conversation_id=? ORDER BY created_at,rowid").all(id);});
 ipcMain.handle("chat:send",async(event,raw:unknown)=>{const parsed=chatInput.safeParse(raw);if(!parsed.success)throw new Error(parsed.error.issues[0]?.message??"Invalid message.");const v=parsed.data,row=getConnection(v.connectionId),key=decryptKey(row);const existing=db.prepare("SELECT id FROM conversations WHERE id=?").get(v.conversationId);if(!existing)throw new Error("This conversation no longer exists. Start a new chat.");
- let model:ChatModel;try{const list=await fetchModels(row.id);const found=list.find(m=>m.id===v.modelId);if(!found)throw new Error("Selected model is not available.");model=found;}catch(error){if(row.provider==="custom"&&row.model_id===v.modelId)model={id:v.modelId,name:v.modelId,protocol:"chat-completions"};else throw error;}
+ let model:ChatModel;try{const list=await fetchModels(row.id);const found=list.find(m=>m.id===v.modelId);if(!found)throw new Error("Selected model is not available.");model=found;}catch(error){if(row.provider==="custom"&&row.model_id===v.modelId)model={id:v.modelId,name:v.modelId,protocol:"chat-completions",free:false};else throw error;}
  const previous=db.prepare("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at,rowid").all(v.conversationId) as{role:"user"|"assistant";content:string}[],userMessageId=randomUUID(),now=new Date().toISOString();
  db.prepare("INSERT INTO messages(id,conversation_id,role,content,connection_id,model_id,created_at) VALUES(?,?,?,?,?,?,?)").run(userMessageId,v.conversationId,"user",v.content,row.id,model.id,now);
  try{const answer=await streamProvider(event,row,model,key,[...previous,{role:"user",content:v.content}],v.requestId);db.prepare("INSERT INTO messages(id,conversation_id,role,content,connection_id,model_id,created_at) VALUES(?,?,?,?,?,?,?)").run(randomUUID(),v.conversationId,"assistant",answer,row.id,model.id,new Date().toISOString());const conversation=db.prepare("SELECT title FROM conversations WHERE id=?").get(v.conversationId) as{title:string};const updatedAt=new Date().toISOString();if(conversation.title==="New chat")db.prepare("UPDATE conversations SET title=?,updated_at=? WHERE id=?").run(v.content.slice(0,60),updatedAt,v.conversationId);else db.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(updatedAt,v.conversationId);return{ok:true};}
