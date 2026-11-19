@@ -35,7 +35,7 @@ function modelFrom(item:any):ChatModel|null{
  const id=typeof item?.id==="string"?item.id:typeof item?.name==="string"?item.name:"";if(!id)return null;
  const advertised=String(item?.protocol??item?.api_protocol??item?.api?.protocol??"").toLowerCase();
  const protocol:ChatModel["protocol"]=advertised.includes("anthropic")||advertised.includes("messages")?"anthropic-messages":advertised.includes("responses")?"responses":advertised.includes("chat")?"chat-completions":zenProtocol(id)??(id.toLowerCase().startsWith("claude-")?"anthropic-messages":id.toLowerCase().startsWith("gpt-")?"responses":"chat-completions");
- return{id,name:typeof item.name==="string"&&item.name!==id?item.name:id,protocol,free:modelIsFree(item)};
+ return{id,name:typeof item.name==="string"&&item.name!==id?item.name:id,protocol,free:modelIsFree(item)||id.toLowerCase().endsWith("-free")};
 }
 async function fetchModels(connectionId:string){
  const row=getConnection(connectionId);
