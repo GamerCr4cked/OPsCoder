@@ -2,79 +2,64 @@ import { app, BrowserWindow, ipcMain, safeStorage } from "electron";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import { z } from "zod";
 
 let db: Database.Database;
-const connectionInput = z.object({
-  provider: z.enum(["opencode-zen", "custom"]),
-  name: z.string().trim().min(1).max(64),
-  baseUrl: z.string().url().max(2048).optional(),
-  protocol: z.enum(["opencode-zen", "openai-chat-completions"]),
-  modelId: z.string().trim().max(200).optional(),
-  apiKey: z.string().trim().min(1).max(4096)
-}).superRefine((v, ctx) => {
-  if (v.provider === "custom" && !v.baseUrl) ctx.addIssue({code:"custom",message:"A valid API base URL is required.",path:["baseUrl"]});
-  if (v.provider === "opencode-zen" && v.protocol !== "opencode-zen") ctx.addIssue({code:"custom",message:"Invalid OpenCode Zen protocol.",path:["protocol"]});
-  if (v.provider === "custom" && v.protocol !== "openai-chat-completions") ctx.addIssue({code:"custom",message:"Unsupported custom protocol.",path:["protocol"]});
+const connectionInput=z.object({provider:z.enum(["opencode-zen","custom"]),name:z.string().trim().min(1).max(64),baseUrl:z.string().url().max(2048).optional(),protocol:z.enum(["opencode-zen","openai-chat-completions"]),modelId:z.string().trim().max(200).optional(),apiKey:z.string().trim().min(1).max(4096)}).superRefine((v,ctx)=>{
+ if(v.provider==="custom"&&!v.baseUrl)ctx.addIssue({code:"custom",message:"A valid API base URL is required.",path:["baseUrl"]});
+ if(v.provider==="opencode-zen"&&v.protocol!=="opencode-zen")ctx.addIssue({code:"custom",message:"Invalid OpenCode Zen protocol.",path:["protocol"]});
+ if(v.provider==="custom"&&v.protocol!=="openai-chat-completions")ctx.addIssue({code:"custom",message:"Unsupported custom protocol.",path:["protocol"]});
 });
-
-function createWindow() {
-  const win = new BrowserWindow({
-    width:1440,height:920,minWidth:980,minHeight:680,backgroundColor:"#0b1017",
-    webPreferences:{preload:join(__dirname,"../preload/index.js"),contextIsolation:true,nodeIntegration:false,sandbox:true}
-  });
-  win.webContents.setWindowOpenHandler(() => ({action:"deny"}));
-  win.webContents.on("will-navigate",(event,url) => {
-    const devUrl = process.env.ELECTRON_RENDERER_URL;
-    if (!devUrl || !url.startsWith(devUrl)) event.preventDefault();
-  });
-  if (process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL);
-  else void win.loadFile(join(__dirname,"../renderer/index.html"));
+const chatInput=z.object({requestId:z.string().uuid(),conversationId:z.string().uuid(),connectionId:z.string().uuid(),modelId:z.string().trim().min(1).max(200),content:z.string().trim().min(1).max(100000)});
+const modelInput=z.object({connectionId:z.string().uuid()});
+const selectModelInput=z.object({connectionId:z.string().uuid(),modelId:z.string().trim().min(1).max(200)});
+type ProviderRow={id:string;provider:"opencode-zen"|"custom";base_url:string|null;protocol:string;model_id:string|null;credential:Buffer};
+type ChatModel={id:string;name:string;protocol:"chat-completions"|"responses"|"anthropic-messages"};
+const zenResponses=new Set(["gpt-6-astra","gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna","gpt-5.5","gpt-5.5-pro","gpt-5.4","gpt-5.4-pro","gpt-5.4-mini","gpt-5.4-nano","gpt-5.3-codex","gpt-5.3-codex-spark","gpt-5.2","gpt-5.2-codex","gpt-5.1","gpt-5.1-codex","gpt-5.1-codex-max","gpt-5.1-codex-mini","gpt-5","gpt-5-codex","gpt-5-nano","grok-4.6","grok-4.5","grok-build-0.1","muse-spark-1.3","muse-spark-1.2","muse-spark-1.3-contributor-free"]);
+const zenAnthropic=new Set(["claude-fable-5-2","claude-fable-5-1","claude-fable-5","claude-opus-5-5","claude-opus-5","claude-opus-4-8","claude-opus-4-7","claude-opus-4-6","claude-opus-4-5","claude-sonnet-5-5","claude-sonnet-5","claude-sonnet-4-6","claude-sonnet-4-5","claude-haiku-5-5","claude-haiku-4-5","qwen3.7-max","qwen3.7-plus","qwen3.6-plus","qwen3.5-plus"]);
+const zenChat=new Set(["deepseek-v4-pro","deepseek-v4-flash","deepseek-v4-flash-vision-exp","minimax-m3","minimax-m2.7","minimax-m2.5","glm-5.3-flash","glm-5.3","glm-5.2","glm-5.1","glm-5","kimi-k2.5","kimi-k2.6","kimi-k2.7-code","kimi-k3","big-pickle","mimo-v2.5-free","ling-3.0-flash-fin-free","nemotron-3-ultra-free","nemotron-3.5-lightning-free"]);
+function zenProtocol(id:string):ChatModel["protocol"]|null{if(zenResponses.has(id))return"responses";if(zenAnthropic.has(id))return"anthropic-messages";if(zenChat.has(id))return"chat-completions";return null;}
+function publicCustomBase(value:string){const url=new URL(value);if(url.protocol!=="https:"&&!(url.protocol==="http:"&&["localhost","127.0.0.1","[::1]"].includes(url.hostname)))throw new Error("Custom API URLs must use HTTPS (HTTP is allowed only for localhost).");if(url.username||url.password||url.search||url.hash)throw new Error("The API base URL cannot contain credentials, query parameters, or fragments.");const host=url.hostname.toLowerCase();if(host==="localhost"||host==="127.0.0.1"||host==="[::1]")return url.toString().replace(/\/$/,"");if(host.endsWith(".local")||isIP(host))throw new Error("Use a public HTTPS hostname for custom API connections.");return url.toString().replace(/\/$/,"");}
+function getConnection(id:string):ProviderRow{const row=db.prepare("SELECT id,provider,base_url,protocol,model_id,credential FROM connections WHERE id=?").get(id) as ProviderRow|undefined;if(!row)throw new Error("Connection not found. Refresh Connections and select it again.");if(!safeStorage.isEncryptionAvailable())throw new Error("Secure credential storage is unavailable on this system.");return row;}
+function decryptKey(row:ProviderRow){return safeStorage.decryptString(row.credential);}
+function apiBase(row:ProviderRow){return row.provider==="opencode-zen"?"https://opencode.ai/zen/v1":publicCustomBase(row.base_url??"");}
+function parseModels(payload:any):any[]{if(Array.isArray(payload))return payload;if(Array.isArray(payload?.data))return payload.data;if(Array.isArray(payload?.models))return payload.models;return[];}
+function modelFrom(item:any):ChatModel|null{const id=typeof item?.id==="string"?item.id:typeof item?.name==="string"?item.name:"";if(!id)return null;const protocol=zenProtocol(id);if(!protocol)return null;return{id,name:typeof item.name==="string"&&item.name!==id?item.name:id,protocol};}
+async function fetchModels(connectionId:string){const row=getConnection(connectionId),key=decryptKey(row),base=apiBase(row);const response=await fetch(new URL("models",base+"/"),{headers:{Authorization:"Bearer "+key,Accept:"application/json"},signal:AbortSignal.timeout(20000)});if(!response.ok)throw new Error("Model request failed ("+response.status+"): "+(await response.text()).slice(0,500));const items=parseModels(await response.json());if(row.provider==="opencode-zen"){const models=items.map(modelFrom).filter((m):m is ChatModel=>Boolean(m));if(!models.length)throw new Error("No supported text chat models were returned by OpenCode Zen.");return models;}return items.map((item:any)=>({id:String(item.id??""),name:String(item.name??item.id??""),protocol:"chat-completions" as const})).filter((m:ChatModel)=>m.id&&m.name);}
+function endpointFor(row:ProviderRow,model:ChatModel){const path=model.protocol==="responses"?"responses":model.protocol==="anthropic-messages"?"messages":"chat/completions";return new URL(path,apiBase(row)+"/").toString();}
+function parseSseDelta(protocol:ChatModel["protocol"],payload:any):string{if(protocol==="chat-completions")return payload?.choices?.[0]?.delta?.content??"";if(protocol==="responses")return payload?.type==="response.output_text.delta"||payload?.type==="response.refusal.delta"?payload.delta??"":"";return payload?.type==="content_block_delta"&&payload?.delta?.type==="text_delta"?payload.delta.text??"":"";}
+async function streamProvider(event:Electron.IpcMainInvokeEvent,row:ProviderRow,model:ChatModel,key:string,messages:{role:"user"|"assistant";content:string}[],requestId:string){
+ const headers:Record<string,string>={"Content-Type":"application/json","Accept":"text/event-stream"};let body:any;
+ if(model.protocol==="anthropic-messages"){headers["x-api-key"]=key;headers["anthropic-version"]="2023-06-01";body={model:model.id,max_tokens:8192,stream:true,messages:messages.map(m=>({role:m.role,content:m.content}))};}
+ else{headers.Authorization="Bearer "+key;body=model.protocol==="responses"?{model:model.id,stream:true,input:messages.map(m=>({role:m.role,content:[{type:"input_text",text:m.content}]}))}:{model:model.id,stream:true,messages};}
+ const response=await fetch(endpointFor(row,model),{method:"POST",headers,body:JSON.stringify(body),signal:AbortSignal.timeout(180000)});if(!response.ok)throw new Error("Provider request failed ("+response.status+"): "+(await response.text()).slice(0,1000));if(!response.body)throw new Error("The provider returned an empty response stream.");
+ const reader=response.body.getReader(),decoder=new TextDecoder();let buffer="",full="";
+ while(true){const{done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const lines=buffer.split(/\r?\n/);buffer=lines.pop()??"";for(const line of lines){if(!line.startsWith("data:"))continue;const raw=line.slice(5).trim();if(!raw||raw==="[DONE]")continue;try{const delta=parseSseDelta(model.protocol,JSON.parse(raw));if(typeof delta==="string"&&delta){full+=delta;event.sender.send("chat:chunk",{requestId,delta});}}catch{/* Ignore keepalive and non-JSON SSE lines. */}}}
+ if(buffer.startsWith("data:")){const raw=buffer.slice(5).trim();if(raw&&raw!=="[DONE]")try{const delta=parseSseDelta(model.protocol,JSON.parse(raw));if(delta){full+=delta;event.sender.send("chat:chunk",{requestId,delta});}}catch{}}
+ if(!full.trim())throw new Error("The provider returned no text. Check whether the selected model supports this API.");return full;
 }
-
-function initDatabase() {
-  db = new Database(join(app.getPath("userData"),"opscoder.sqlite"));
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS connections (
-      id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL, base_url TEXT,
-      protocol TEXT NOT NULL, model_id TEXT, credential BLOB NOT NULL, created_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS conversations (
-      id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
-      role TEXT NOT NULL CHECK(role IN ('user','assistant')), content TEXT NOT NULL,
-      connection_id TEXT, model_id TEXT, created_at TEXT NOT NULL,
-      FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-    );
-  `);
-}
-
-ipcMain.handle("connections:list", () =>
-  db.prepare("SELECT id,provider,name,base_url,protocol,model_id,created_at FROM connections ORDER BY created_at").all()
-);
-ipcMain.handle("connections:add", (_event, raw: unknown) => {
-  const parsed = connectionInput.safeParse(raw);
-  if (!parsed.success) throw new Error(parsed.error.issues[0]?.message ?? "Invalid connection details.");
-  if (!safeStorage.isEncryptionAvailable()) throw new Error("Secure credential storage is unavailable on this system.");
-  const v = parsed.data, id = randomUUID(), createdAt = new Date().toISOString();
-  const encrypted = safeStorage.encryptString(v.apiKey);
-  db.prepare("INSERT INTO connections (id,provider,name,base_url,protocol,model_id,credential,created_at) VALUES (?,?,?,?,?,?,?,?)")
-    .run(id,v.provider,v.name,v.baseUrl ?? null,v.protocol,v.modelId ?? null,encrypted,createdAt);
-  return {id,provider:v.provider,name:v.name,base_url:v.baseUrl ?? null,protocol:v.protocol,model_id:v.modelId ?? null,created_at:createdAt};
+function createWindow(){const win=new BrowserWindow({width:1440,height:920,minWidth:980,minHeight:680,backgroundColor:"#0b1017",webPreferences:{preload:join(__dirname,"../preload/index.js"),contextIsolation:true,nodeIntegration:false,sandbox:true}});win.webContents.setWindowOpenHandler(()=>({action:"deny"}));win.webContents.on("will-navigate",(event,url)=>{const devUrl=process.env.ELECTRON_RENDERER_URL;if(!devUrl||!url.startsWith(devUrl))event.preventDefault();});if(process.env.ELECTRON_RENDERER_URL)void win.loadURL(process.env.ELECTRON_RENDERER_URL);else void win.loadFile(join(__dirname,"../renderer/index.html"));}
+function initDatabase(){db=new Database(join(app.getPath("userData"),"opscoder.sqlite"));db.pragma("journal_mode=WAL");db.pragma("foreign_keys=ON");db.exec(`
+ CREATE TABLE IF NOT EXISTS connections(id TEXT PRIMARY KEY,provider TEXT NOT NULL,name TEXT NOT NULL,base_url TEXT,protocol TEXT NOT NULL,model_id TEXT,credential BLOB NOT NULL,created_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,title TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('user','assistant')),content TEXT NOT NULL,connection_id TEXT,model_id TEXT,created_at TEXT NOT NULL,FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE);
+ `);const columns=db.prepare("PRAGMA table_info(connections)").all() as{name:string}[];if(!columns.some(c=>c.name==="base_url"))db.exec("ALTER TABLE connections ADD COLUMN base_url TEXT");}
+ipcMain.handle("connections:list",()=>db.prepare("SELECT id,provider,name,base_url,protocol,model_id,created_at FROM connections ORDER BY created_at").all());
+ipcMain.handle("connections:add",(_event,raw:unknown)=>{const parsed=connectionInput.safeParse(raw);if(!parsed.success)throw new Error(parsed.error.issues[0]?.message??"Invalid connection details.");if(!safeStorage.isEncryptionAvailable())throw new Error("Secure credential storage is unavailable on this system.");const v=parsed.data,id=randomUUID(),createdAt=new Date().toISOString(),baseUrl=v.provider==="custom"?publicCustomBase(v.baseUrl!):null;const encrypted=safeStorage.encryptString(v.apiKey);db.prepare("INSERT INTO connections(id,provider,name,base_url,protocol,model_id,credential,created_at) VALUES(?,?,?,?,?,?,?,?)").run(id,v.provider,v.name,baseUrl,v.protocol,v.modelId??null,encrypted,createdAt);return{id,provider:v.provider,name:v.name,base_url:baseUrl,protocol:v.protocol,model_id:v.modelId??null,created_at:createdAt};});
+ipcMain.handle("connections:remove",(_event,id:unknown)=>{if(typeof id!=="string"||id.length>64)throw new Error("Invalid connection ID.");db.prepare("DELETE FROM connections WHERE id=?").run(id);return true;});
+ipcMain.handle("connections:models",async(_event,raw:unknown)=>{const parsed=modelInput.safeParse(raw);if(!parsed.success)throw new Error("Invalid connection selection.");return fetchModels(parsed.data.connectionId);});
+ipcMain.handle("connections:set-model",(_event,raw:unknown)=>{const parsed=selectModelInput.safeParse(raw);if(!parsed.success)throw new Error("Invalid model selection.");const result=db.prepare("UPDATE connections SET model_id=? WHERE id=?").run(parsed.data.modelId,parsed.data.connectionId);if(!result.changes)throw new Error("Connection not found.");return true;});
+ipcMain.handle("conversations:list",()=>db.prepare("SELECT id,title,created_at,updated_at FROM conversations ORDER BY updated_at DESC LIMIT 100").all());
+ipcMain.handle("conversations:create",()=>{const id=randomUUID(),now=new Date().toISOString();db.prepare("INSERT INTO conversations(id,title,created_at,updated_at) VALUES(?,?,?,?)").run(id,"New chat",now,now);return{id,title:"New chat",created_at:now,updated_at:now};});
+ipcMain.handle("messages:list",(_event,id:unknown)=>{if(typeof id!=="string"||!z.string().uuid().safeParse(id).success)throw new Error("Invalid conversation.");return db.prepare("SELECT id,role,content,connection_id,model_id,created_at FROM messages WHERE conversation_id=? ORDER BY created_at,rowid").all(id);});
+ipcMain.handle("chat:send",async(event,raw:unknown)=>{const parsed=chatInput.safeParse(raw);if(!parsed.success)throw new Error(parsed.error.issues[0]?.message??"Invalid message.");const v=parsed.data,row=getConnection(v.connectionId),key=decryptKey(row);const existing=db.prepare("SELECT id FROM conversations WHERE id=?").get(v.conversationId);if(!existing)throw new Error("This conversation no longer exists. Start a new chat.");
+ let model:ChatModel;try{const list=await fetchModels(row.id);const found=list.find(m=>m.id===v.modelId);if(!found)throw new Error("Selected model is not available.");model=found;}catch(error){if(row.provider==="custom"&&row.model_id===v.modelId)model={id:v.modelId,name:v.modelId,protocol:"chat-completions"};else throw error;}
+ const previous=db.prepare("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at,rowid").all(v.conversationId) as{role:"user"|"assistant";content:string}[],userMessageId=randomUUID(),now=new Date().toISOString();
+ db.prepare("INSERT INTO messages(id,conversation_id,role,content,connection_id,model_id,created_at) VALUES(?,?,?,?,?,?,?)").run(userMessageId,v.conversationId,"user",v.content,row.id,model.id,now);
+ try{const answer=await streamProvider(event,row,model,key,[...previous,{role:"user",content:v.content}],v.requestId);db.prepare("INSERT INTO messages(id,conversation_id,role,content,connection_id,model_id,created_at) VALUES(?,?,?,?,?,?,?)").run(randomUUID(),v.conversationId,"assistant",answer,row.id,model.id,new Date().toISOString());const conversation=db.prepare("SELECT title FROM conversations WHERE id=?").get(v.conversationId) as{title:string};const updatedAt=new Date().toISOString();if(conversation.title==="New chat")db.prepare("UPDATE conversations SET title=?,updated_at=? WHERE id=?").run(v.content.slice(0,60),updatedAt,v.conversationId);else db.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(updatedAt,v.conversationId);return{ok:true};}
+ catch(error){db.prepare("DELETE FROM messages WHERE id=?").run(userMessageId);throw error instanceof Error?error:new Error("The provider request failed.");}
 });
-ipcMain.handle("connections:remove", (_event,id: unknown) => {
-  if (typeof id !== "string" || id.length > 64) throw new Error("Invalid connection ID.");
-  db.prepare("DELETE FROM connections WHERE id = ?").run(id);
-  return true;
-});
-
-app.whenReady().then(() => {
-  initDatabase(); createWindow();
-  app.on("activate",() => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
-}).catch(error => { console.error("OPsCoder startup failed:",error); app.quit(); });
-app.on("before-quit",() => { if (db?.open) db.close(); });
-app.on("window-all-closed",() => { if (process.platform !== "darwin") app.quit(); });
+app.whenReady().then(()=>{app.setPath("userData",join(app.getPath("appData"),"opscoder"));initDatabase();createWindow();app.on("activate",()=>{if(BrowserWindow.getAllWindows().length===0)createWindow();});}).catch(error=>{console.error("OPsCoder startup failed:",error);app.quit();});
+app.on("before-quit",()=>{if(db?.open)db.close();});
+app.on("window-all-closed",()=>{if(process.platform!=="darwin")app.quit();});

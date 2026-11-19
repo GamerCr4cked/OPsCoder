@@ -1,6 +1,6 @@
 {
   "name": "opscoder",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "A secure multi-connection desktop AI client",
   "main": "out/main/index.js",
@@ -32,22 +32,13 @@
   "build": {
     "appId": "run.place.gc.opscoder",
     "productName": "OPsCoder",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "out/**/*",
-      "package.json"
-    ],
-    "win": {
-      "target": [
-        "nsis"
-      ],
-      "artifactName": "OPsCoder-Setup-${version}.${ext}"
-    },
+    "directories": {"output": "release"},
+    "files": ["out/**/*","package.json"],
+    "win": {"target": ["nsis"],"artifactName": "OPsCoder-Setup-${version}.${ext}"},
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     }
