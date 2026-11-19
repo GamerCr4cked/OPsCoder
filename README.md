@@ -2,11 +2,11 @@
 
 A Windows desktop AI client built with Electron, React and TypeScript.
 
-This repository is being initialized from the V1 desktop scaffold. The first milestone is a stable, secure desktop shell; provider networking and streaming will be added in subsequent milestones.
-
 ## Current status
 
-The initial scaffold includes the dark desktop UI, navigation, connection management UI, SQLite persistence, Electron safeStorage credential encryption, secure preload bridge, and NSIS installer configuration. It is not yet a functional AI chat client: provider requests, model discovery, streaming, and conversation restoration remain planned work.
+This is the initial desktop-shell milestone. It includes the dark desktop UI, navigation, connection management, SQLite persistence, Electron `safeStorage` credential encryption, a restricted preload bridge, IPC input validation, and NSIS installer configuration.
+
+**Important:** OPsCoder is not yet a functioning AI chat client. Provider requests, model discovery, API-key testing, streaming, and conversation restoration are not implemented in this milestone.
 
 ## Requirements
 
@@ -39,4 +39,4 @@ Other native provider integrations are deferred.
 
 ## Security
 
-Never commit API keys, local databases, or build artifacts. Credentials must remain in Electron's main process and be protected with OS-backed secure storage.
+Never commit API keys, local databases, or build artifacts. Credentials remain in Electron's main process and are encrypted with OS-backed secure storage.
