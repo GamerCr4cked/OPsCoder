@@ -22,5 +22,23 @@ contextBridge.exposeInMainWorld("opscoder", {
    ipcRenderer.on("chat:chunk",listener);
    return () => ipcRenderer.removeListener("chat:chunk",listener);
   }
+ },
+ cli: {
+  status: (conversationId: string) => ipcRenderer.invoke("cli:status",{conversationId}),
+  enable: (conversationId: string) => ipcRenderer.invoke("cli:enable",{conversationId}),
+  disable: (conversationId: string) => ipcRenderer.invoke("cli:disable",{conversationId}),
+  chooseWorkspace: (conversationId: string) => ipcRenderer.invoke("cli:choose-workspace",{conversationId}),
+  setAutoApprove: (conversationId: string, enabled: boolean) => ipcRenderer.invoke("cli:set-auto-approve",{conversationId,enabled}),
+  decide: (approvalId: string, decision: "once"|"always"|"deny") => ipcRenderer.invoke("cli:decide",{approvalId,decision}),
+  onApproval: (callback: (payload: CliApproval) => void) => {
+   const listener = (_event: Electron.IpcRendererEvent, payload: CliApproval) => callback(payload);
+   ipcRenderer.on("cli:approval",listener);
+   return () => ipcRenderer.removeListener("cli:approval",listener);
+  },
+  onResult: (callback: (payload: CliResultEvent) => void) => {
+   const listener = (_event: Electron.IpcRendererEvent, payload: CliResultEvent) => callback(payload);
+   ipcRenderer.on("cli:result",listener);
+   return () => ipcRenderer.removeListener("cli:result",listener);
+  }
  }
 });

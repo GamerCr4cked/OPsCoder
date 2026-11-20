@@ -9,6 +9,7 @@ A Windows desktop AI client built with Electron, React and TypeScript.
 - **Model discovery**: live catalogue loading, free-model tagging, cached results, and manual model IDs for APIs that expose no catalogue.
 - **Local-first chats**: conversations and messages persist in SQLite and are restored on launch.
 - **Stop an in-flight response** without losing the text already received.
+- **CLI mode**: toggle it in the composer, pick a workspace folder, and let the model inspect and change files by running shell commands. Every command asks for approval, with *Allow once*, *Always allow in this chat* and *Deny*. Auto-approve can be turned off again, and turning CLI mode off clears it.
 - **Encrypted credentials**: API keys are stored with Electron `safeStorage` in the main process; the renderer never receives them.
 - **Windows installer**: NSIS build with an optional clean-install path, plus a rolling `continuous` release from CI.
 
@@ -36,6 +37,20 @@ Installer output: `release/`.
 
 CI stamps every main-branch build with the next patch version (`0.2.1`, `0.2.2`, ...), used in both the installer filename and the app metadata, then commits the bump back to `main` with `[skip ci]` so the next build continues from it. Pull-request builds neither bump nor publish.
 
+## CLI mode
+
+Turn on **CLI** in the composer to let the model inspect and change files. The first time, OPsCoder asks for a workspace folder; the folder is remembered for that chat.
+
+Every proposed command opens an approval dialog:
+
+- **Allow once** runs the command a single time.
+- **Always allow in this chat** runs it and auto-approves later commands in the same chat. Click the **×** beside the auto-approve badge to return to per-command approval.
+- **Deny** tells the model the command was refused.
+
+Turning CLI off stops new approvals and clears auto-approve. Commands run through PowerShell as your Windows user, with a 120-second timeout and a 120 KB output cap. Commands are **not** sandboxed, so they can reach files outside the chosen workspace.
+
+Models with native tool calling receive a `run_command` tool. If the protocol does not expose tools, or the API rejects the tool request, OPsCoder falls back to executing fenced code blocks tagged `cli`; both paths use the same approval flow.
+
 ## Architecture
 
 | Path | Role |
@@ -54,6 +69,7 @@ CI stamps every main-branch build with the next patch version (`0.2.1`, `0.2.2`,
 - API keys, databases and build artifacts are never committed.
 - A strict Content-Security-Policy is injected into production builds; the dev server keeps its HMR-friendly policy.
 - Navigation, popups, webviews and renderer permission requests are blocked.
+- CLI mode is opt-in per chat, commands run in the chosen workspace with a 120-second timeout and an output cap, and commands cannot run unless the user approves them (or enables auto-approve for that chat). Commands execute as the logged-in Windows user, so only use CLI mode in workspaces you trust.
 
 ## V1 provider scope
 
