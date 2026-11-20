@@ -216,15 +216,14 @@ const CLI_BLOCK_PATTERN=/```cli[ \t]*\r?\n([\s\S]*?)```/gi;
 function extractCliCommands(text:string){const commands:string[]=[];CLI_BLOCK_PATTERN.lastIndex=0;let match:RegExpExecArray|null;while((match=CLI_BLOCK_PATTERN.exec(text))&&commands.length<4){const command=match[1].trim();if(command)commands.push(command);}return commands;}
 function stripCliBlocks(text:string){CLI_BLOCK_PATTERN.lastIndex=0;return text.replace(CLI_BLOCK_PATTERN,"").replace(/\n{3,}/g,"\n\n").trim();}
 function parseCommandArguments(raw:string){try{const value=JSON.parse(raw);return typeof value?.command==="string"?value.command.trim():"";}catch{return"";}}
-function cliSystemPrompt(workspace:string){
+function cliSystemPrompt(workspace:string,native:boolean){
  return [
   "You are OPsCoder running in CLI mode. You can inspect and change the user's files by running shell commands.",
   "Platform: "+(process.platform==="win32"?"Windows with PowerShell":process.platform)+". Working directory: "+workspace,
-  "Use the run_command tool to run commands. Run one command at a time and wait for its output.",
+  native?"Use the run_command tool to run commands. Run one command at a time and wait for its output.":"The run_command tool is not available in this chat. Reply with exactly one fenced block tagged cli containing the command. The app runs it and sends the output back.",
   "Keep commands short and non-interactive. Never start editors, REPLs, pagers, servers, ssh sessions, top, or anything that waits for input.",
   "The user must approve each command unless they enabled auto-approve for this chat. If a command is denied, do not retry it; ask the user how to proceed.",
-  "Explain destructive or irreversible actions before running them. Read files before editing.",
-  "If the run_command tool is unavailable, reply with exactly one fenced block tagged cli containing the command. The app runs it and sends the output back."
+  "Explain destructive or irreversible actions before running them. Read files before editing."
  ].join("\n");
 }
 function validWorkspace(path:string|null|undefined):path is string{if(!path||!isAbsolute(path))return false;try{return statSync(path).isDirectory();}catch{return false;}}
@@ -284,17 +283,17 @@ function executeCommand(command:string,cwd:string,signal:AbortSignal):Promise<Co
 }
 function formatCliOutput(result:CommandResult){const status=result.timedOut?"Command timed out after "+(CLI_TIMEOUT/1000)+" seconds.":result.truncated?"Command stopped after reaching the output limit (exit code "+(result.exitCode??"unknown")+").":"Exit code: "+(result.exitCode??"unknown");const body=result.output.trim()||"(no output)";return status+"\nOutput:\n"+(body.length>30000?body.slice(0,30000)+"\n[output truncated for the model]":body);}
 function appendCommandOutput(transcript:TranscriptMessage[],native:boolean,callId:string,content:string){transcript.push(native?{role:"tool",callId,name:RUN_COMMAND_TOOL.name,content}:{role:"user",content:"[CLI result]\n"+content});}
-async function runCliTurn(event:Electron.IpcMainInvokeEvent,row:ProviderRow,model:ChatModel,key:string,requestId:string,conversationId:string,workspace:string,system:string,signal:AbortSignal,transcript:TranscriptMessage[]){
+async function runCliTurn(event:Electron.IpcMainInvokeEvent,row:ProviderRow,model:ChatModel,key:string,requestId:string,conversationId:string,workspace:string,signal:AbortSignal,transcript:TranscriptMessage[]){
  for(let round=0;round<CLI_MAX_ROUNDS;round++){
   if(signal.aborted)throw new StreamCancelledError("");
   if(!cliSessions.get(conversationId)?.enabled)return;
   let native=model.protocol!=="responses"&&nativeToolSupport.get(row.id)!==false;
   let result:{text:string;toolCalls:ToolCall[]};
-  try{result=await streamRound(event,row,model,key,transcript,requestId,signal,{system,tools:native});}
+  try{result=await streamRound(event,row,model,key,transcript,requestId,signal,{system:cliSystemPrompt(workspace,native),tools:native});}
   catch(error){
    if(native&&error instanceof ProviderHttpError&&[400,404,422].includes(error.status)){
     nativeToolSupport.set(row.id,false);native=false;
-    result=await streamRound(event,row,model,key,transcript,requestId,signal,{system,tools:false});
+    result=await streamRound(event,row,model,key,transcript,requestId,signal,{system:cliSystemPrompt(workspace,false),tools:false});
    }else throw error;
   }
   const commands:{id:string;command:string}[]=[];
@@ -369,7 +368,7 @@ ipcMain.handle("chat:send",async(event,raw:unknown)=>{
  activeStreams.set(v.requestId,record);
  try{
   if(cliActive){
-   await runCliTurn(event,row,model,key,v.requestId,v.conversationId,workspace!,cliSystemPrompt(workspace!),controller.signal,transcript);
+   await runCliTurn(event,row,model,key,v.requestId,v.conversationId,workspace!,controller.signal,transcript);
   }else{
    const answer=(await streamRound(event,row,model,key,transcript,v.requestId,controller.signal,{system:"",tools:false})).text;
    insertMessage(v.conversationId,"assistant",answer,"text",null,row.id,model.id);
