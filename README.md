@@ -34,6 +34,8 @@ npm run dist:win
 
 Installer output: `release/`.
 
+CI stamps every main-branch build with the next patch version (`0.2.1`, `0.2.2`, ...), used in both the installer filename and the app metadata, then commits the bump back to `main` with `[skip ci]` so the next build continues from it. Pull-request builds neither bump nor publish.
+
 ## Architecture
 
 | Path | Role |

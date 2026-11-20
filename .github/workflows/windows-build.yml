@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -30,6 +32,13 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
+
+      # Every build gets the next patch version (0.2.1, 0.2.2, ...).
+      # The bump is committed back after a successful build so the counter
+      # carries forward. Pull-request builds never bump or commit.
+      - name: Bump patch version
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        run: npm version patch --no-git-tag-version
 
       - name: Type check
         run: npm run typecheck
@@ -63,3 +72,18 @@ jobs:
           overwrite_files: true
           fail_on_unmatched_files: true
           generate_release_notes: false
+
+      # Persist the bump so the next build starts from the version that was
+      # actually packaged. Commits made with GITHUB_TOKEN do not start another
+      # workflow run; [skip ci] is a belt-and-braces guard.
+      - name: Commit version bump
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore(release): v$VERSION [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
