@@ -1,10 +1,11 @@
-import { app, BrowserWindow, ipcMain, safeStorage } from "electron";
+import { app, BrowserWindow, ipcMain, safeStorage, session } from "electron";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { z } from "zod";
 
+app.enableSandbox();
 let db: Database.Database;
 const connectionInput=z.object({provider:z.enum(["opencode-zen","custom"]),name:z.string().trim().min(1).max(64),baseUrl:z.string().url().max(2048).optional(),protocol:z.enum(["opencode-zen","openai-chat-completions"]),modelId:z.string().trim().max(200).optional(),apiKey:z.string().trim().min(1).max(4096)}).superRefine((v,ctx)=>{
  if(v.provider==="custom"&&!v.baseUrl)ctx.addIssue({code:"custom",message:"A valid API base URL is required.",path:["baseUrl"]});
@@ -12,10 +13,17 @@ const connectionInput=z.object({provider:z.enum(["opencode-zen","custom"]),name:
  if(v.provider==="custom"&&v.protocol!=="openai-chat-completions")ctx.addIssue({code:"custom",message:"Unsupported custom protocol.",path:["protocol"]});
 });
 const chatInput=z.object({requestId:z.string().uuid(),conversationId:z.string().uuid(),connectionId:z.string().uuid(),modelId:z.string().trim().min(1).max(200),content:z.string().trim().min(1).max(100000)});
-const modelInput=z.object({connectionId:z.string().uuid()});
+const modelInput=z.object({connectionId:z.string().uuid(),force:z.boolean().optional()});
+const cancelInput=z.object({requestId:z.string().uuid()});
 const selectModelInput=z.object({connectionId:z.string().uuid(),modelId:z.string().trim().min(1).max(200)});
 type ProviderRow={id:string;provider:"opencode-zen"|"custom";base_url:string|null;protocol:string;model_id:string|null;credential:Buffer};
 type ChatModel={id:string;name:string;protocol:"chat-completions"|"responses"|"anthropic-messages";free:boolean;baseUrl?:string};
+type StreamRecord={controller:AbortController;cancelled:boolean};
+const modelCache=new Map<string,{at:number;models:ChatModel[]}>();
+const modelInflight=new Map<string,Promise<ChatModel[]>>();
+const activeStreams=new Map<string,StreamRecord>();
+const MODEL_CACHE_TTL=5*60*1000;
+class StreamCancelledError extends Error{constructor(readonly partial:string){super("The response was stopped.");this.name="StreamCancelledError";}}
 const zenResponses=new Set(["gpt-6-astra","gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna","gpt-5.5","gpt-5.5-pro","gpt-5.4","gpt-5.4-pro","gpt-5.4-mini","gpt-5.4-nano","gpt-5.3-codex","gpt-5.3-codex-spark","gpt-5.2","gpt-5.2-codex","gpt-5.1","gpt-5.1-codex","gpt-5.1-codex-max","gpt-5.1-codex-mini","gpt-5","gpt-5-codex","gpt-5-nano","grok-4.6","grok-4.5","grok-build-0.1","muse-spark-1.3","muse-spark-1.2","muse-spark-1.3-contributor-free"]);
 const zenAnthropic=new Set(["claude-fable-5-2","claude-fable-5-1","claude-fable-5","claude-opus-5-5","claude-opus-5","claude-opus-4-8","claude-opus-4-7","claude-opus-4-6","claude-opus-4-5","claude-sonnet-5-5","claude-sonnet-5","claude-sonnet-4-6","claude-sonnet-4-5","claude-haiku-5-5","claude-haiku-4-5","qwen3.7-max","qwen3.7-plus","qwen3.6-plus","qwen3.5-plus"]);
 const zenChat=new Set(["deepseek-v4-pro","deepseek-v4-flash","deepseek-v4-flash-vision-exp","minimax-m3","minimax-m2.7","minimax-m2.5","glm-5.3-flash","glm-5.3","glm-5.2","glm-5.1","glm-5","kimi-k2.5","kimi-k2.6","kimi-k2.7-code","kimi-k3","big-pickle","mimo-v2.5-free","ling-3.0-flash-fin-free","nemotron-3-ultra-free","nemotron-3.5-lightning-free"]);
@@ -56,44 +64,76 @@ function modelFrom(item:any):ChatModel|null{
  const baseUrl=apiEntry&&typeof (apiEntry[1] as any).base_url==="string"?(apiEntry[1] as any).base_url:undefined;
  return{id,name:typeof item.name==="string"&&item.name!==id?item.name:id,protocol,free:modelIsFree(item)||id.toLowerCase().endsWith("-free"),baseUrl};
 }
-async function fetchModels(connectionId:string){
- const row=getConnection(connectionId);
- const manual=db.prepare("SELECT model_id AS id,name,protocol,free FROM connection_models WHERE connection_id=? ORDER BY created_at").all(connectionId) as {id:string;name:string;protocol:ChatModel["protocol"];free:number}[];
+function manualModels(connectionId:string){return db.prepare("SELECT model_id AS id,name,protocol,free FROM connection_models WHERE connection_id=? ORDER BY created_at").all(connectionId) as {id:string;name:string;protocol:ChatModel["protocol"];free:number}[];}
+async function discoverModels(row:ProviderRow){
+ const key=decryptKey(row);
+ const urls=row.provider==="opencode-zen"?["https://opencode.ai/inference/v1/models","https://opencode.ai/zen/v1/models"]:[new URL("models",apiBase(row)+"/").toString()];
+ let lastError:unknown;
+ for(const url of urls){
+  try{
+   const response=await fetch(url,{headers:{Authorization:"Bearer "+key,Accept:"application/json"},signal:AbortSignal.timeout(20000)});
+   if(!response.ok)throw new Error("Model request failed ("+response.status+"): "+(await response.text()).slice(0,500));
+   const items=parseModels(await response.json());
+   const parsed=items.map((item:any)=>modelFrom(item)).filter((m:ChatModel|null):m is ChatModel=>Boolean(m&&m.id&&m.name));
+   if(!parsed.length)throw new Error("The provider returned an empty or unsupported model catalogue.");
+   return parsed;
+  }catch(error){lastError=error;}
+ }
+ throw lastError instanceof Error?lastError:new Error("Could not load the provider model catalogue.");
+}
+function sharedDiscovery(row:ProviderRow){
+ const inflight=modelInflight.get(row.id);if(inflight)return inflight;
+ let tracked:Promise<ChatModel[]>;
+ const pending=discoverModels(row).then(models=>{modelCache.set(row.id,{at:Date.now(),models});return models;});
+ tracked=pending.finally(()=>{if(modelInflight.get(row.id)===tracked)modelInflight.delete(row.id);});
+ modelInflight.set(row.id,tracked);
+ return tracked;
+}
+async function fetchModels(connectionId:string,force=false){
+ const row=getConnection(connectionId),manual=manualModels(connectionId),cached=modelCache.get(connectionId);
  let discovered:ChatModel[]=[];
- try{
-  const key=decryptKey(row);
-  const urls=row.provider==="opencode-zen"?["https://opencode.ai/inference/v1/models","https://opencode.ai/zen/v1/models"]:[new URL("models",apiBase(row)+"/").toString()];
-  let lastError:unknown;
-  for(const url of urls){
-   try{
-    const response=await fetch(url,{headers:{Authorization:"Bearer "+key,Accept:"application/json"},signal:AbortSignal.timeout(20000)});
-    if(!response.ok)throw new Error("Model request failed ("+response.status+"): "+(await response.text()).slice(0,500));
-    const items=parseModels(await response.json());
-    const parsed=items.map((item:any)=>modelFrom(item)).filter((m:ChatModel|null):m is ChatModel=>Boolean(m&&m.id&&m.name));
-    if(!parsed.length)throw new Error("The provider returned an empty or unsupported model catalogue.");
-    discovered=parsed;
-    break;
-   }catch(error){lastError=error;}
-  }
-  if(!discovered.length)throw lastError instanceof Error?lastError:new Error("Could not load the provider model catalogue.");
- }catch(error){if(!manual.length)throw error;}
+ if(!force&&cached&&Date.now()-cached.at<MODEL_CACHE_TTL)discovered=cached.models;
+ else{
+  try{discovered=await sharedDiscovery(row);}
+  catch(error){if(cached?.models.length)discovered=cached.models;else if(!manual.length)throw error;}
+ }
  const merged=[...discovered];for(const item of manual){if(!merged.some(m=>m.id===item.id))merged.push({id:item.id,name:item.name,protocol:item.protocol,free:Boolean(item.free)});}
  if(!merged.length)throw new Error("The provider returned no models. You can still add a model ID manually.");
  return merged;
 }
+function touchConversation(conversationId:string,titleSource:string){
+ const conversation=db.prepare("SELECT title FROM conversations WHERE id=?").get(conversationId) as{title:string}|undefined;
+ const updatedAt=new Date().toISOString();
+ if(conversation?.title==="New chat")db.prepare("UPDATE conversations SET title=?,updated_at=? WHERE id=?").run(titleSource.slice(0,60),updatedAt,conversationId);
+ else db.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(updatedAt,conversationId);
+}
 function endpointFor(row:ProviderRow,model:ChatModel){const path=model.protocol==="responses"?"responses":model.protocol==="anthropic-messages"?"messages":"chat/completions";return new URL(path,(model.baseUrl??apiBase(row))+"/").toString();}
 function parseSseDelta(protocol:ChatModel["protocol"],payload:any):string{if(protocol==="chat-completions")return payload?.choices?.[0]?.delta?.content??"";if(protocol==="responses")return payload?.type==="response.output_text.delta"||payload?.type==="response.refusal.delta"?payload.delta??"":"";return payload?.type==="content_block_delta"&&payload?.delta?.type==="text_delta"?payload.delta.text??"":"";}
-async function streamProvider(event:Electron.IpcMainInvokeEvent,row:ProviderRow,model:ChatModel,key:string,messages:{role:"user"|"assistant";content:string}[],requestId:string){
+async function streamProvider(event:Electron.IpcMainInvokeEvent,row:ProviderRow,model:ChatModel,key:string,messages:{role:"user"|"assistant";content:string}[],requestId:string,signal:AbortSignal){
  const headers:Record<string,string>={"Content-Type":"application/json","Accept":"text/event-stream"};let body:any;
  if(model.protocol==="anthropic-messages"){headers["x-api-key"]=key;headers["anthropic-version"]="2023-06-01";body={model:model.id,max_tokens:8192,stream:true,messages:messages.map(m=>({role:m.role,content:m.content}))};}
  else{headers.Authorization="Bearer "+key;body=model.protocol==="responses"?{model:model.id,stream:true,input:messages.map(m=>({role:m.role,content:[{type:"input_text",text:m.content}]}))}:{model:model.id,stream:true,messages};}
- const response=await fetch(endpointFor(row,model),{method:"POST",headers,body:JSON.stringify(body),signal:AbortSignal.timeout(180000)});if(!response.ok)throw new Error("Provider request failed ("+response.status+"): "+(await response.text()).slice(0,1000));if(!response.body)throw new Error("The provider returned an empty response stream.");
- const reader=response.body.getReader(),decoder=new TextDecoder();let buffer="",full="";
- while(true){const{done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const lines=buffer.split(/\r?\n/);buffer=lines.pop()??"";for(const line of lines){if(!line.startsWith("data:"))continue;const raw=line.slice(5).trim();if(!raw||raw==="[DONE]")continue;try{const delta=parseSseDelta(model.protocol,JSON.parse(raw));if(typeof delta==="string"&&delta){full+=delta;event.sender.send("chat:chunk",{requestId,delta});}}catch{/* Ignore keepalive and non-JSON SSE lines. */}}}
- if(buffer.startsWith("data:")){const raw=buffer.slice(5).trim();if(raw&&raw!=="[DONE]")try{const delta=parseSseDelta(model.protocol,JSON.parse(raw));if(delta){full+=delta;event.sender.send("chat:chunk",{requestId,delta});}}catch{}}
+ let full="";
+ try{
+  const response=await fetch(endpointFor(row,model),{method:"POST",headers,body:JSON.stringify(body),signal});if(!response.ok)throw new Error("Provider request failed ("+response.status+"): "+(await response.text()).slice(0,1000));if(!response.body)throw new Error("The provider returned an empty response stream.");
+  const reader=response.body.getReader(),decoder=new TextDecoder();let buffer="";
+  while(true){const{done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const lines=buffer.split(/\r?\n/);buffer=lines.pop()??"";for(const line of lines){if(!line.startsWith("data:"))continue;const raw=line.slice(5).trim();if(!raw||raw==="[DONE]")continue;try{const delta=parseSseDelta(model.protocol,JSON.parse(raw));if(typeof delta==="string"&&delta){full+=delta;event.sender.send("chat:chunk",{requestId,delta});}}catch{/* Ignore keepalive and non-JSON SSE lines. */}}}
+  if(buffer.startsWith("data:")){const raw=buffer.slice(5).trim();if(raw&&raw!=="[DONE]")try{const delta=parseSseDelta(model.protocol,JSON.parse(raw));if(delta){full+=delta;event.sender.send("chat:chunk",{requestId,delta});}}catch{}}
+ }catch(error){
+  if(signal.aborted)throw new StreamCancelledError(full);
+  throw error;
+ }
  if(!full.trim())throw new Error("The provider returned no text. Check whether the selected model supports this API.");return full;
 }
-function createWindow(){const win=new BrowserWindow({width:1440,height:920,minWidth:980,minHeight:680,backgroundColor:"#0b1017",webPreferences:{preload:join(__dirname,"../preload/index.js"),contextIsolation:true,nodeIntegration:false,sandbox:true}});win.webContents.setWindowOpenHandler(()=>({action:"deny"}));win.webContents.on("will-navigate",(event,url)=>{const devUrl=process.env.ELECTRON_RENDERER_URL;if(!devUrl||!url.startsWith(devUrl))event.preventDefault();});if(process.env.ELECTRON_RENDERER_URL)void win.loadURL(process.env.ELECTRON_RENDERER_URL);else void win.loadFile(join(__dirname,"../renderer/index.html"));}
+function createWindow(){
+ const win=new BrowserWindow({width:1440,height:920,minWidth:980,minHeight:680,backgroundColor:"#0b1017",webPreferences:{preload:join(__dirname,"../preload/index.js"),contextIsolation:true,nodeIntegration:false,sandbox:true,devTools:!app.isPackaged,webviewTag:false}});
+ const devUrl=process.env.ELECTRON_RENDERER_URL,devOrigin=devUrl?new URL(devUrl).origin:"",allowNavigation=(url:string)=>{try{return Boolean(devOrigin&&new URL(url).origin===devOrigin);}catch{return false;}};
+ win.webContents.setWindowOpenHandler(()=>({action:"deny"}));
+ win.webContents.on("will-navigate",(event,url)=>{if(!allowNavigation(url))event.preventDefault();});
+ win.webContents.on("will-redirect",(event,url)=>{if(!allowNavigation(url))event.preventDefault();});
+ win.webContents.on("will-attach-webview",event=>event.preventDefault());
+ if(devUrl)void win.loadURL(devUrl);else void win.loadFile(join(__dirname,"../renderer/index.html"));
+}
 function initDatabase(){db=new Database(join(app.getPath("userData"),"opscoder.sqlite"));db.pragma("journal_mode=WAL");db.pragma("foreign_keys=ON");db.exec(`
  CREATE TABLE IF NOT EXISTS connections(id TEXT PRIMARY KEY,provider TEXT NOT NULL,name TEXT NOT NULL,base_url TEXT,protocol TEXT NOT NULL,model_id TEXT,credential BLOB NOT NULL,created_at TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY,title TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
@@ -102,21 +142,42 @@ function initDatabase(){db=new Database(join(app.getPath("userData"),"opscoder.s
  `);const columns=db.prepare("PRAGMA table_info(connections)").all() as{name:string}[];if(!columns.some(c=>c.name==="base_url"))db.exec("ALTER TABLE connections ADD COLUMN base_url TEXT");}
 ipcMain.handle("connections:list",()=>db.prepare("SELECT id,provider,name,base_url,protocol,model_id,created_at FROM connections ORDER BY created_at").all());
 ipcMain.handle("connections:add",(_event,raw:unknown)=>{const parsed=connectionInput.safeParse(raw);if(!parsed.success)throw new Error(parsed.error.issues[0]?.message??"Invalid connection details.");if(!safeStorage.isEncryptionAvailable())throw new Error("Secure credential storage is unavailable on this system.");const v=parsed.data,id=randomUUID(),createdAt=new Date().toISOString(),baseUrl=v.provider==="custom"?publicCustomBase(v.baseUrl!):null;const encrypted=safeStorage.encryptString(v.apiKey);db.prepare("INSERT INTO connections(id,provider,name,base_url,protocol,model_id,credential,created_at) VALUES(?,?,?,?,?,?,?,?)").run(id,v.provider,v.name,baseUrl,v.protocol,v.modelId??null,encrypted,createdAt);if(v.modelId)db.prepare("INSERT OR IGNORE INTO connection_models(connection_id,model_id,name,protocol,free,created_at) VALUES(?,?,?,?,0,?)").run(id,v.modelId,v.modelId,"chat-completions",createdAt);return{id,provider:v.provider,name:v.name,base_url:baseUrl,protocol:v.protocol,model_id:v.modelId??null,created_at:createdAt};});
-ipcMain.handle("connections:remove",(_event,id:unknown)=>{if(typeof id!=="string"||id.length>64)throw new Error("Invalid connection ID.");db.prepare("DELETE FROM connections WHERE id=?").run(id);return true;});
+ipcMain.handle("connections:remove",(_event,id:unknown)=>{if(typeof id!=="string"||id.length>64)throw new Error("Invalid connection ID.");db.prepare("DELETE FROM connections WHERE id=?").run(id);modelCache.delete(id);modelInflight.delete(id);return true;});
 ipcMain.handle("connections:rename",(_event,raw:unknown)=>{const v=z.object({connectionId:z.string().uuid(),name:z.string().trim().min(1).max(64)}).parse(raw);const result=db.prepare("UPDATE connections SET name=? WHERE id=?").run(v.name,v.connectionId);if(!result.changes)throw new Error("Connection not found.");return true;});
 ipcMain.handle("connections:add-model",(_event,raw:unknown)=>{const v=z.object({connectionId:z.string().uuid(),modelId:z.string().trim().min(1).max(200),name:z.string().trim().min(1).max(200).optional(),protocol:z.enum(["chat-completions","responses","anthropic-messages"]).default("chat-completions"),free:z.boolean().default(false)}).parse(raw);getConnection(v.connectionId);db.prepare("INSERT INTO connection_models(connection_id,model_id,name,protocol,free,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(connection_id,model_id) DO UPDATE SET name=excluded.name,protocol=excluded.protocol,free=excluded.free").run(v.connectionId,v.modelId,v.name??v.modelId,v.protocol,v.free?1:0,new Date().toISOString());db.prepare("UPDATE connections SET model_id=? WHERE id=?").run(v.modelId,v.connectionId);return true;});
-ipcMain.handle("connections:models",async(_event,raw:unknown)=>{const parsed=modelInput.safeParse(raw);if(!parsed.success)throw new Error("Invalid connection selection.");return fetchModels(parsed.data.connectionId);});
+ipcMain.handle("connections:models",async(_event,raw:unknown)=>{const parsed=modelInput.safeParse(raw);if(!parsed.success)throw new Error("Invalid connection selection.");return fetchModels(parsed.data.connectionId,parsed.data.force===true);});
 ipcMain.handle("connections:set-model",(_event,raw:unknown)=>{const parsed=selectModelInput.safeParse(raw);if(!parsed.success)throw new Error("Invalid model selection.");const result=db.prepare("UPDATE connections SET model_id=? WHERE id=?").run(parsed.data.modelId,parsed.data.connectionId);if(!result.changes)throw new Error("Connection not found.");return true;});
 ipcMain.handle("conversations:list",()=>db.prepare("SELECT id,title,created_at,updated_at FROM conversations ORDER BY updated_at DESC LIMIT 100").all());
 ipcMain.handle("conversations:create",()=>{const id=randomUUID(),now=new Date().toISOString();db.prepare("INSERT INTO conversations(id,title,created_at,updated_at) VALUES(?,?,?,?)").run(id,"New chat",now,now);return{id,title:"New chat",created_at:now,updated_at:now};});
 ipcMain.handle("messages:list",(_event,id:unknown)=>{if(typeof id!=="string"||!z.string().uuid().safeParse(id).success)throw new Error("Invalid conversation.");return db.prepare("SELECT id,role,content,connection_id,model_id,created_at FROM messages WHERE conversation_id=? ORDER BY created_at,rowid").all(id);});
-ipcMain.handle("chat:send",async(event,raw:unknown)=>{const parsed=chatInput.safeParse(raw);if(!parsed.success)throw new Error(parsed.error.issues[0]?.message??"Invalid message.");const v=parsed.data,row=getConnection(v.connectionId),key=decryptKey(row);const existing=db.prepare("SELECT id FROM conversations WHERE id=?").get(v.conversationId);if(!existing)throw new Error("This conversation no longer exists. Start a new chat.");
+ipcMain.handle("chat:send",async(event,raw:unknown)=>{
+ const parsed=chatInput.safeParse(raw);if(!parsed.success)throw new Error(parsed.error.issues[0]?.message??"Invalid message.");
+ const v=parsed.data,row=getConnection(v.connectionId),key=decryptKey(row);const existing=db.prepare("SELECT id FROM conversations WHERE id=?").get(v.conversationId);if(!existing)throw new Error("This conversation no longer exists. Start a new chat.");
  let model:ChatModel;try{const list=await fetchModels(row.id);const found=list.find(m=>m.id===v.modelId);if(!found)throw new Error("Selected model is not available.");model=found;}catch(error){if(row.provider==="custom"&&row.model_id===v.modelId)model={id:v.modelId,name:v.modelId,protocol:"chat-completions",free:false};else throw error;}
  const previous=db.prepare("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at,rowid").all(v.conversationId) as{role:"user"|"assistant";content:string}[],userMessageId=randomUUID(),now=new Date().toISOString();
  db.prepare("INSERT INTO messages(id,conversation_id,role,content,connection_id,model_id,created_at) VALUES(?,?,?,?,?,?,?)").run(userMessageId,v.conversationId,"user",v.content,row.id,model.id,now);
- try{const answer=await streamProvider(event,row,model,key,[...previous,{role:"user",content:v.content}],v.requestId);db.prepare("INSERT INTO messages(id,conversation_id,role,content,connection_id,model_id,created_at) VALUES(?,?,?,?,?,?,?)").run(randomUUID(),v.conversationId,"assistant",answer,row.id,model.id,new Date().toISOString());const conversation=db.prepare("SELECT title FROM conversations WHERE id=?").get(v.conversationId) as{title:string};const updatedAt=new Date().toISOString();if(conversation.title==="New chat")db.prepare("UPDATE conversations SET title=?,updated_at=? WHERE id=?").run(v.content.slice(0,60),updatedAt,v.conversationId);else db.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(updatedAt,v.conversationId);return{ok:true};}
- catch(error){const updatedAt=new Date().toISOString();db.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(updatedAt,v.conversationId);throw error instanceof Error?error:new Error("The provider request failed.");}
+ const controller=new AbortController(),timeout=setTimeout(()=>controller.abort("timeout"),180000),record:StreamRecord={controller,cancelled:false};
+ activeStreams.set(v.requestId,record);
+ try{
+  const answer=await streamProvider(event,row,model,key,[...previous,{role:"user",content:v.content}],v.requestId,controller.signal);
+  db.prepare("INSERT INTO messages(id,conversation_id,role,content,connection_id,model_id,created_at) VALUES(?,?,?,?,?,?,?)").run(randomUUID(),v.conversationId,"assistant",answer,row.id,model.id,new Date().toISOString());
+  touchConversation(v.conversationId,v.content);return{ok:true};
+ }catch(error){
+  if(error instanceof StreamCancelledError&&record.cancelled){
+   if(error.partial.trim())db.prepare("INSERT INTO messages(id,conversation_id,role,content,connection_id,model_id,created_at) VALUES(?,?,?,?,?,?,?)").run(randomUUID(),v.conversationId,"assistant",error.partial,row.id,model.id,new Date().toISOString());
+   touchConversation(v.conversationId,v.content);return{ok:true,cancelled:true};
+  }
+  if(error instanceof StreamCancelledError)throw new Error("The provider request timed out after 180 seconds.");
+  touchConversation(v.conversationId,v.content);throw error instanceof Error?error:new Error("The provider request failed.");
+ }finally{
+  clearTimeout(timeout);if(activeStreams.get(v.requestId)===record)activeStreams.delete(v.requestId);
+ }
 });
-app.whenReady().then(()=>{app.setPath("userData",join(app.getPath("appData"),"opscoder"));initDatabase();createWindow();app.on("activate",()=>{if(BrowserWindow.getAllWindows().length===0)createWindow();});}).catch(error=>{console.error("OPsCoder startup failed:",error);app.quit();});
+ipcMain.handle("chat:cancel",(_event,raw:unknown)=>{
+ const parsed=cancelInput.safeParse(raw);if(!parsed.success)throw new Error("Invalid cancellation request.");
+ const active=activeStreams.get(parsed.data.requestId);if(!active)return false;
+ active.cancelled=true;active.controller.abort("cancelled");return true;
+});
+app.whenReady().then(()=>{app.setAppUserModelId("run.place.gc.opscoder");app.setPath("userData",join(app.getPath("appData"),"opscoder"));session.defaultSession.setPermissionRequestHandler((_wc,_permission,callback)=>callback(false));session.defaultSession.setPermissionCheckHandler(()=>false);initDatabase();createWindow();app.on("activate",()=>{if(BrowserWindow.getAllWindows().length===0)createWindow();});}).catch(error=>{console.error("OPsCoder startup failed:",error);app.quit();});
 app.on("before-quit",()=>{if(db?.open)db.close();});
 app.on("window-all-closed",()=>{if(process.platform!=="darwin")app.quit();});

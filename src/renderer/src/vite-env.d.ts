@@ -7,7 +7,7 @@ interface Window {
    remove: (id: string) => Promise<boolean>;
    rename: (connectionId:string,name:string) => Promise<boolean>;
    addModel: (connectionId:string,modelId:string,name?:string) => Promise<boolean>;
-   models: (connectionId: string) => Promise<ChatModel[]>;
+   models: (connectionId: string, force?: boolean) => Promise<ChatModel[]>;
    setModel: (connectionId: string, modelId: string) => Promise<boolean>;
   };
   conversations: {
@@ -16,7 +16,8 @@ interface Window {
   };
   messages: { list: (conversationId: string) => Promise<ChatMessage[]> };
   chat: {
-   send: (input: ChatSendInput) => Promise<{ok:boolean}>;
+   send: (input: ChatSendInput) => Promise<{ok:boolean;cancelled?:boolean}>;
+   cancel: (requestId: string) => Promise<boolean>;
    onChunk: (callback:(payload:{requestId:string;delta:string})=>void) => () => void;
   };
  };
