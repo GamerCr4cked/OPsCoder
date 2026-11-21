@@ -1,6 +1,8 @@
 import { memo, useEffect, useRef, useState } from "react";
-import { ArrowDown, Bug, Check, Copy, FileCode2, FolderOpen, Lightbulb, Send, ShieldCheck, Sparkles, Square, Terminal, Waves, X } from "lucide-react";
+import { ArrowDown, Bug, Check, Copy, FileCode2, FolderOpen, Lightbulb, Send, ShieldCheck, Sparkles, Square, Terminal, X } from "lucide-react";
+import { displayName, type UserProfile } from "../profile";
 import type { CliActivity, CliMeta, Message, SettingsTab } from "../types";
+import { BrandMark, ProfileAvatar } from "./Brand";
 
 type ChatViewProps = {
  messages: Message[];
@@ -9,8 +11,7 @@ type ChatViewProps = {
  cliActivity: CliActivity | null;
  hasConnection: boolean;
  hasModel: boolean;
- identityName: string;
- identityHandle: string;
+ profile: UserProfile;
  onSend: (content: string) => boolean;
  onStop: () => void;
  onToggleCli: () => void;
@@ -22,7 +23,7 @@ type ChatViewProps = {
 const parseMeta = (value: string | null | undefined): CliMeta => { try { return value ? JSON.parse(value) : {}; } catch { return {}; } };
 const folderName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 
-export default function ChatView({ messages, sending, cliStatus, cliActivity, hasConnection, hasModel, identityName, identityHandle, onSend, onStop, onToggleCli, onChangeWorkspace, onSetAutoApprove, onOpenSettings }: ChatViewProps) {
+export default function ChatView({ messages, sending, cliStatus, cliActivity, hasConnection, hasModel, profile, onSend, onStop, onToggleCli, onChangeWorkspace, onSetAutoApprove, onOpenSettings }: ChatViewProps) {
  const [draft, setDraft] = useState("");
  const [jumpVisible, setJumpVisible] = useState(false);
  const scrollRef = useRef<HTMLDivElement>(null);
@@ -88,7 +89,7 @@ export default function ChatView({ messages, sending, cliStatus, cliActivity, ha
    <div className="messages-scroll" ref={scrollRef} onScroll={handleScroll}>
     <div className="messages-inner">
      {!messages.length && !sending && <section className="empty-state">
-      <div className="empty-mark"><Waves size={28} /></div>
+      <div className="empty-mark"><BrandMark size={64} variant="outline" /></div>
       <h1>What are we building today?</h1>
       <p>{!hasConnection ? "Connect a provider to start chatting with your own models." : !hasModel ? "Choose a model for this connection, then start a conversation." : cliStatus.enabled ? "CLI mode is on. OPsCoder can inspect files and run commands in your workspace." : "Ask anything. Turn on CLI when you want OPsCoder to work inside a folder."}</p>
       {!canChat && <button className="btn btn-primary empty-cta" onClick={() => onOpenSettings(hasConnection ? "models" : "connections")}>{hasConnection ? "Choose a model" : "Connect a provider"}</button>}
@@ -100,7 +101,7 @@ export default function ChatView({ messages, sending, cliStatus, cliActivity, ha
       </div>}
       <small className="empty-credit">A local-first workspace by ITzGamerCracked_</small>
      </section>}
-     <MessageList messages={messages} sending={sending} identityName={identityName} identityHandle={identityHandle} />
+     <MessageList messages={messages} sending={sending} profile={profile} />
     </div>
    </div>
    {jumpVisible && <button className="jump-latest" onClick={() => scrollToLatest(true)} title="Jump to latest" aria-label="Jump to latest message"><ArrowDown size={16} /></button>}
@@ -146,23 +147,23 @@ export default function ChatView({ messages, sending, cliStatus, cliActivity, ha
  </div>;
 }
 
-const MessageList = memo(function MessageList({ messages, sending, identityName, identityHandle }: { messages: Message[]; sending: boolean; identityName: string; identityHandle: string }) {
- return <>{messages.map((message, index) => <MessageItem key={message.id} message={message} streaming={sending && index === messages.length - 1 && message.role === "assistant"} identityName={identityName} identityHandle={identityHandle} />)}</>;
+const MessageList = memo(function MessageList({ messages, sending, profile }: { messages: Message[]; sending: boolean; profile: UserProfile }) {
+ return <>{messages.map((message, index) => <MessageItem key={message.id} message={message} streaming={sending && index === messages.length - 1 && message.role === "assistant"} profile={profile} />)}</>;
 });
 
-const MessageItem = memo(function MessageItem({ message, streaming, identityName, identityHandle }: { message: Message; streaming: boolean; identityName: string; identityHandle: string }) {
+const MessageItem = memo(function MessageItem({ message, streaming, profile }: { message: Message; streaming: boolean; profile: UserProfile }) {
  if (message.kind === "cli") return <CliCard message={message} />;
  const user = message.role === "user";
  return <article className={"message-row " + message.role}>
-  {!user && <span className="message-avatar assistant"><Waves size={15} /></span>}
+  {!user && <span className="message-avatar assistant"><BrandMark size={19} /></span>}
   <div className="message-content">
-   <div className="message-name">{user ? identityName : "OPsCoder"}</div>
+   <div className="message-name">{user ? displayName(profile) : "OPsCoder"}</div>
    {user
     ? <div className="message-bubble">{message.content}</div>
     : <div className="message-text">{message.content}{streaming && message.content && <span className="streaming-caret" />}{streaming && !message.content && <TypingDots />}</div>}
    {message.content && <CopyButton text={message.content} />}
   </div>
-  {user && <span className="message-avatar user" title={identityName}>{identityHandle}</span>}
+  {user && <ProfileAvatar profile={profile} size={30} className="message-user-avatar" />}
  </article>;
 });
 
@@ -171,28 +172,45 @@ function TypingDots() {
 }
 
 function CopyButton({ text }: { text: string }) {
- const [copied, setCopied] = useState(false);
+ const [status, setStatus] = useState<"idle" | "copied" | "error">("idle");
  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
  const copy = async () => {
   try {
-   if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
-   else {
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.style.position = "fixed";
-    area.style.opacity = "0";
-    document.body.appendChild(area);
-    area.select();
-    document.execCommand("copy");
-    area.remove();
-   }
-   setCopied(true);
+   await copyText(text);
+   setStatus("copied");
    if (timer.current) clearTimeout(timer.current);
-   timer.current = setTimeout(() => setCopied(false), 1400);
-  } catch { /* Ignore clipboard failures. */ }
+   timer.current = setTimeout(() => setStatus("idle"), 1400);
+  } catch {
+   setStatus("error");
+   if (timer.current) clearTimeout(timer.current);
+   timer.current = setTimeout(() => setStatus("idle"), 2000);
+  }
  };
- return <button className="message-copy" onClick={() => void copy()} title={copied ? "Copied" : "Copy message"} aria-label="Copy message">{copied ? <Check size={12} /> : <Copy size={12} />}</button>;
+ return <button className="message-copy" onClick={() => void copy()} title={status === "copied" ? "Copied" : status === "error" ? "Could not copy" : "Copy message"} aria-label="Copy message">
+  {status === "copied" ? <Check size={12} /> : status === "error" ? <X size={12} /> : <Copy size={12} />}
+  <span>{status === "copied" ? "Copied" : status === "error" ? "Failed" : "Copy"}</span>
+ </button>;
+}
+
+async function copyText(text: string) {
+ try {
+  const bridge = window.opscoder.clipboard;
+  if (bridge && await bridge.writeText(text)) return;
+ } catch { /* Try the browser API next. */ }
+ try {
+  if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return; }
+ } catch { /* Fall back to a temporary textarea. */ }
+ const area = document.createElement("textarea");
+ area.value = text;
+ area.setAttribute("readonly", "");
+ area.style.position = "fixed";
+ area.style.opacity = "0";
+ document.body.appendChild(area);
+ area.select();
+ const copied = document.execCommand("copy");
+ area.remove();
+ if (!copied) throw new Error("Clipboard unavailable.");
 }
 
 const CliCard = memo(function CliCard({ message }: { message: Message }) {

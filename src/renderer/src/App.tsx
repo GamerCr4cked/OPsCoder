@@ -4,18 +4,18 @@ import ChatView from "./components/ChatView";
 import { AddConnectionModal, ApprovalModal, ConfirmModal, RenameChatModal, RenameConnectionModal } from "./components/Modals";
 import { Sidebar } from "./components/Sidebar";
 import SettingsView from "./components/SettingsView";
+import { loadProfile, saveProfile, type UserProfile } from "./profile";
 import { loadTheme, saveTheme, type ThemeSettings } from "./theme";
 import type { CliActivity, Message, Page, SettingsTab } from "./types";
 
 type ConfirmState = { kind: "chat"; chat: Conversation } | { kind: "connection"; connection: Connection };
-const IDENTITY_NAME = "ITzGamerCracked_";
-const IDENTITY_HANDLE = "GC";
 const uid = () => crypto.randomUUID();
 
 export default function App() {
  const [page, setPage] = useState<Page>("chat");
  const [settingsTab, setSettingsTab] = useState<SettingsTab>("appearance");
  const [theme, setTheme] = useState<ThemeSettings>(() => loadTheme());
+ const [profile, setProfile] = useState<UserProfile>(() => loadProfile());
  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => { try { return localStorage.getItem("opscoder.sidebar") === "1"; } catch { return false; } });
 
  const [connections, setConnections] = useState<Connection[]>([]);
@@ -283,6 +283,7 @@ export default function App() {
  }, [active, manualModel, chooseModel]);
 
  const changeTheme = useCallback((next: ThemeSettings) => { setTheme(next); saveTheme(next); }, []);
+ const changeProfile = useCallback((next: UserProfile) => { setProfile(next); saveProfile(next); }, []);
  const openSettings = useCallback((tab: SettingsTab) => { setSettingsTab(tab); setPage("settings"); setModelMenuOpen(false); }, []);
  const toggleSidebar = useCallback(() => setSidebarCollapsed(value => !value), []);
  const handleNewChat = useCallback(() => { void newChat(); }, [newChat]);
@@ -431,8 +432,7 @@ export default function App() {
    collapsed={sidebarCollapsed}
    conversations={conversations}
    activeChatId={conversationId}
-   identityName={IDENTITY_NAME}
-   identityHandle={IDENTITY_HANDLE}
+   profile={profile}
    onToggle={toggleSidebar}
    onNewChat={handleNewChat}
    onOpenChat={handleOpenChat}
@@ -487,8 +487,7 @@ export default function App() {
      cliActivity={cliActivity}
      hasConnection={Boolean(active)}
      hasModel={Boolean(selectedModel ?? active?.model_id)}
-     identityName={IDENTITY_NAME}
-     identityHandle={IDENTITY_HANDLE}
+     profile={profile}
      onSend={sendMessage}
      onStop={() => void cancelResponse()}
      onToggleCli={() => void toggleCli()}
@@ -504,6 +503,8 @@ export default function App() {
     onBack={() => setPage("chat")}
     theme={theme}
     onThemeChange={changeTheme}
+    profile={profile}
+    onProfileChange={changeProfile}
     connections={connections}
     activeId={activeId}
     onSetActive={setActiveId}

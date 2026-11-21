@@ -2,6 +2,7 @@
 declare const __APP_VERSION__: string;
 interface Window {
  opscoder: {
+  clipboard: { writeText: (text: string) => Promise<boolean> };
   connections: {
    list: () => Promise<Connection[]>;
    add: (input: AddConnectionInput) => Promise<Connection>;

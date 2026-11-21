@@ -1,13 +1,14 @@
 import { memo, useDeferredValue, useMemo, useState } from "react";
-import { MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Search, Settings, Trash2, Waves } from "lucide-react";
+import { MessageSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Search, Settings, Trash2 } from "lucide-react";
+import { displayName, type UserProfile } from "../profile";
 import type { SettingsTab } from "../types";
+import { BrandMark, ProfileAvatar } from "./Brand";
 
 type SidebarProps = {
  collapsed: boolean;
  conversations: Conversation[];
  activeChatId: string;
- identityName: string;
- identityHandle: string;
+ profile: UserProfile;
  onToggle: () => void;
  onNewChat: () => void;
  onOpenChat: (id: string) => void;
@@ -16,7 +17,7 @@ type SidebarProps = {
  onOpenSettings: (tab: SettingsTab) => void;
 };
 
-export const Sidebar = memo(function Sidebar({ collapsed, conversations, activeChatId, identityName, identityHandle, onToggle, onNewChat, onOpenChat, onRenameChat, onDeleteChat, onOpenSettings }: SidebarProps) {
+export const Sidebar = memo(function Sidebar({ collapsed, conversations, activeChatId, profile, onToggle, onNewChat, onOpenChat, onRenameChat, onDeleteChat, onOpenSettings }: SidebarProps) {
  const [query, setQuery] = useState("");
  const deferredQuery = useDeferredValue(query);
  const groups = useMemo(() => groupChats(conversations, deferredQuery), [conversations, deferredQuery]);
@@ -24,7 +25,7 @@ export const Sidebar = memo(function Sidebar({ collapsed, conversations, activeC
  return <aside className={"sidebar " + (collapsed ? "collapsed" : "")}>
   <div className="sidebar-top">
    {!collapsed && <button className="brand" onClick={() => onOpenSettings("about")} title="About OPsCoder">
-    <span className="brand-mark"><Waves size={18} /></span>
+    <span className="brand-mark"><BrandMark size={26} /></span>
     <span className="brand-name">OPsCoder</span>
    </button>}
    <button className="icon-btn" onClick={onToggle} title={collapsed ? "Expand sidebar" : "Collapse sidebar"} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}>{collapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}</button>
@@ -57,9 +58,9 @@ export const Sidebar = memo(function Sidebar({ collapsed, conversations, activeC
   </div>}
 
   <div className="sidebar-footer">
-   <button className="profile" onClick={() => onOpenSettings("about")} title={identityName}>
-    <span className="avatar">{identityHandle}</span>
-    {!collapsed && <span className="profile-meta"><b>{identityName}</b><small>OPs project family</small></span>}
+   <button className="profile" onClick={() => onOpenSettings("profile")} title={displayName(profile)}>
+    <ProfileAvatar profile={profile} size={30} />
+    {!collapsed && <span className="profile-meta"><b>{displayName(profile)}</b><small>Local profile</small></span>}
    </button>
    <button className="icon-btn" onClick={() => onOpenSettings("appearance")} title="Settings" aria-label="Settings"><Settings size={17} /></button>
   </div>

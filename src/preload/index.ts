@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 contextBridge.exposeInMainWorld("opscoder", {
+ clipboard: { writeText: (text: string) => ipcRenderer.invoke("clipboard:write-text", text) },
  connections: {
   list: () => ipcRenderer.invoke("connections:list"),
   add: (input: unknown) => ipcRenderer.invoke("connections:add", input),

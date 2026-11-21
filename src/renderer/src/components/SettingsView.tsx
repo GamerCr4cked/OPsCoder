@@ -1,7 +1,9 @@
-import type { CSSProperties, ReactNode } from "react";
-import { ArrowLeft, Boxes, Check, Info, Moon, Palette, Pencil, Plug, Plus, RefreshCw, ShieldCheck, Sparkles, Sun, Trash2, Zap } from "lucide-react";
+import { useRef, useState, type ChangeEvent, type CSSProperties, type ReactNode } from "react";
+import { ArrowLeft, Boxes, Check, Info, Moon, Palette, Pencil, Plug, Plus, RefreshCw, RotateCcw, ShieldCheck, Sparkles, Sun, Trash2, Upload, UserRound, Zap } from "lucide-react";
+import { DEFAULT_PROFILE, PROFILE_NAME_MAX, displayName, imageToAvatar, type UserProfile } from "../profile";
 import { ACCENT_PRESETS, type ThemeSettings } from "../theme";
 import type { SettingsTab } from "../types";
+import { BrandMark, ProfileAvatar } from "./Brand";
 
 type SettingsViewProps = {
  tab: SettingsTab;
@@ -9,6 +11,8 @@ type SettingsViewProps = {
  onBack: () => void;
  theme: ThemeSettings;
  onThemeChange: (theme: ThemeSettings) => void;
+ profile: UserProfile;
+ onProfileChange: (profile: UserProfile) => void;
  connections: Connection[];
  activeId: string;
  onSetActive: (id: string) => void;
@@ -26,14 +30,28 @@ type SettingsViewProps = {
 };
 
 const TABS: { id: SettingsTab; label: string; icon: ReactNode }[] = [
+ { id: "profile", label: "Profile", icon: <UserRound size={15} /> },
  { id: "appearance", label: "Appearance", icon: <Palette size={15} /> },
  { id: "connections", label: "Connections", icon: <Plug size={15} /> },
  { id: "models", label: "Models", icon: <Boxes size={15} /> },
  { id: "about", label: "About", icon: <Info size={15} /> }
 ];
 
-export default function SettingsView({ tab, onTab, onBack, theme, onThemeChange, connections, activeId, onSetActive, onAddConnection, onRenameConnection, onRemoveConnection, onUseConnection, models, modelsBusy, onRefreshModels, onSelectModel, manualModel, onManualModel, onAddManualModel }: SettingsViewProps) {
+export default function SettingsView({ tab, onTab, onBack, theme, onThemeChange, profile, onProfileChange, connections, activeId, onSetActive, onAddConnection, onRenameConnection, onRemoveConnection, onUseConnection, models, modelsBusy, onRefreshModels, onSelectModel, manualModel, onManualModel, onAddManualModel }: SettingsViewProps) {
  const active = connections.find(connection => connection.id === activeId);
+ const avatarInput = useRef<HTMLInputElement>(null);
+ const [avatarError, setAvatarError] = useState("");
+
+ const updateName = (value: string) => onProfileChange({ ...profile, name: value.slice(0, PROFILE_NAME_MAX) });
+ const commitName = () => onProfileChange({ ...profile, name: displayName(profile) });
+ const uploadAvatar = async (event: ChangeEvent<HTMLInputElement>) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  setAvatarError("");
+  try { onProfileChange({ ...profile, avatar: await imageToAvatar(file) }); }
+  catch (caught) { setAvatarError(caught instanceof Error ? caught.message : "That image could not be used."); }
+ };
  return <div className="settings-view">
   <div className="settings-inner">
    <header className="settings-header">
@@ -44,6 +62,32 @@ export default function SettingsView({ tab, onTab, onBack, theme, onThemeChange,
    <div className="settings-tabs">
     {TABS.map(item => <button key={item.id} className={"settings-tab " + (tab === item.id ? "active" : "")} onClick={() => onTab(item.id)}>{item.icon}{item.label}</button>)}
    </div>
+
+   {tab === "profile" && <section className="settings-panel">
+    <div className="panel-heading"><h2>Profile</h2><p>How you appear in your local chats. Nothing leaves this device.</p></div>
+    <div className="settings-card profile-settings">
+     <div className="profile-settings-head">
+      <ProfileAvatar profile={profile} size={72} />
+      <div className="profile-settings-name"><b>{displayName(profile)}</b><small>Local profile</small></div>
+      <span className="tag">On this device</span>
+     </div>
+     <label className="field">
+      <span>Display name</span>
+      <input value={profile.name} maxLength={PROFILE_NAME_MAX} placeholder={DEFAULT_PROFILE.name} spellCheck={false} onChange={event => updateName(event.target.value)} onBlur={commitName} onKeyDown={event => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+     </label>
+     <div className="field profile-avatar-field">
+      <span>Avatar</span>
+      <div className="avatar-actions">
+       <input ref={avatarInput} className="avatar-file" type="file" accept="image/png,image/jpeg,image/webp" onChange={event => void uploadAvatar(event)} />
+       <button className="btn btn-secondary" onClick={() => avatarInput.current?.click()}><Upload size={14} />Upload photo</button>
+       {profile.avatar && <button className="btn btn-secondary" onClick={() => { setAvatarError(""); onProfileChange({ ...profile, avatar: null }); }}><RotateCcw size={14} />Use default</button>}
+      </div>
+      <small>PNG, JPEG or WebP. Your photo is cropped square and saved locally.</small>
+      {avatarError && <p className="profile-error" role="alert">{avatarError}</p>}
+     </div>
+    </div>
+    <p className="settings-note">Your name and avatar appear in the sidebar and on your messages.</p>
+   </section>}
 
    {tab === "appearance" && <section className="settings-panel">
     <div className="panel-heading"><h2>Appearance</h2><p>Pick a theme, or build a custom one with your own accent color.</p></div>
@@ -117,7 +161,7 @@ export default function SettingsView({ tab, onTab, onBack, theme, onThemeChange,
 
    {tab === "about" && <section className="settings-panel">
     <div className="about-hero">
-     <span className="about-mark"><Sparkles size={26} /></span>
+     <span className="about-mark"><BrandMark size={42} variant="outline" /></span>
      <div><h2>OPsCoder</h2><p>Part of the OPs project family by <b>ITzGamerCracked_</b>.</p></div>
      <span className="tag">v{__APP_VERSION__}</span>
     </div>
