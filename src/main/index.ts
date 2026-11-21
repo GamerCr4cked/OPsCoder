@@ -19,11 +19,12 @@ const modelInput=z.object({connectionId:z.string().uuid(),force:z.boolean().opti
 const cancelInput=z.object({requestId:z.string().uuid()});
 const selectModelInput=z.object({connectionId:z.string().uuid(),modelId:z.string().trim().min(1).max(200)});
 const conversationRef=z.object({conversationId:z.string().uuid()});
+const conversationRenameInput=z.object({conversationId:z.string().uuid(),title:z.string().trim().min(1).max(80)});
 const cliToggleInput=z.object({conversationId:z.string().uuid(),enabled:z.boolean()});
 const cliApprovalInput=z.object({approvalId:z.string().uuid(),decision:z.enum(["once","always","deny"])});
 type ProviderRow={id:string;provider:"opencode-zen"|"custom";base_url:string|null;protocol:string;model_id:string|null;credential:Buffer};
 type ChatModel={id:string;name:string;protocol:"chat-completions"|"responses"|"anthropic-messages";free:boolean;baseUrl?:string};
-type StreamRecord={controller:AbortController;cancelled:boolean};
+type StreamRecord={controller:AbortController;cancelled:boolean;conversationId:string};
 type ToolCall={id:string;name:string;arguments:string};
 type TranscriptMessage={role:"user"|"assistant";content:string;toolCalls?:ToolCall[]}|{role:"tool";callId:string;name:string;content:string};
 type CommandResult={output:string;exitCode:number|null;timedOut:boolean;truncated:boolean;aborted:boolean};
@@ -119,10 +120,11 @@ async function fetchModels(connectionId:string,force=false){
  if(!merged.length)throw new Error("The provider returned no models. You can still add a model ID manually.");
  return merged;
 }
+function conversationExists(conversationId:string){return Boolean(db.prepare("SELECT 1 FROM conversations WHERE id=?").get(conversationId));}
 function touchConversation(conversationId:string,titleSource:string){
  const conversation=db.prepare("SELECT title FROM conversations WHERE id=?").get(conversationId) as{title:string}|undefined;
  const updatedAt=new Date().toISOString();
- if(conversation?.title==="New chat")db.prepare("UPDATE conversations SET title=?,updated_at=? WHERE id=?").run(titleSource.slice(0,60),updatedAt,conversationId);
+ if(conversation?.title==="New chat"){const title=titleSource.replace(/\s+/g," ").trim().slice(0,48)||"New chat";db.prepare("UPDATE conversations SET title=?,updated_at=? WHERE id=?").run(title,updatedAt,conversationId);}
  else db.prepare("UPDATE conversations SET updated_at=? WHERE id=?").run(updatedAt,conversationId);
 }
 function endpointFor(row:ProviderRow,model:ChatModel){const path=model.protocol==="responses"?"responses":model.protocol==="anthropic-messages"?"messages":"chat/completions";return new URL(path,(model.baseUrl??apiBase(row))+"/").toString();}
@@ -330,7 +332,7 @@ async function runCliTurn(event:Electron.IpcMainInvokeEvent,row:ProviderRow,mode
  throw new Error("CLI mode stopped after "+CLI_MAX_ROUNDS+" command rounds. Send another message to continue.");
 }
 function createWindow(){
- const win=new BrowserWindow({width:1440,height:920,minWidth:980,minHeight:680,backgroundColor:"#0b1017",webPreferences:{preload:join(__dirname,"../preload/index.js"),contextIsolation:true,nodeIntegration:false,sandbox:true,devTools:!app.isPackaged,webviewTag:false}});
+ const win=new BrowserWindow({width:1440,height:920,minWidth:980,minHeight:680,backgroundColor:"#0b0e12",webPreferences:{preload:join(__dirname,"../preload/index.js"),contextIsolation:true,nodeIntegration:false,sandbox:true,devTools:!app.isPackaged,webviewTag:false}});
  const devUrl=process.env.ELECTRON_RENDERER_URL,devOrigin=devUrl?new URL(devUrl).origin:"",allowNavigation=(url:string)=>{try{return Boolean(devOrigin&&new URL(url).origin===devOrigin);}catch{return false;}};
  win.webContents.setWindowOpenHandler(()=>({action:"deny"}));
  win.webContents.on("will-navigate",(event,url)=>{if(!allowNavigation(url))event.preventDefault();});
@@ -355,6 +357,13 @@ ipcMain.handle("connections:models",async(_event,raw:unknown)=>{const parsed=mod
 ipcMain.handle("connections:set-model",(_event,raw:unknown)=>{const parsed=selectModelInput.safeParse(raw);if(!parsed.success)throw new Error("Invalid model selection.");const result=db.prepare("UPDATE connections SET model_id=? WHERE id=?").run(parsed.data.modelId,parsed.data.connectionId);if(!result.changes)throw new Error("Connection not found.");return true;});
 ipcMain.handle("conversations:list",()=>db.prepare("SELECT id,title,created_at,updated_at FROM conversations ORDER BY updated_at DESC LIMIT 100").all());
 ipcMain.handle("conversations:create",()=>{const id=randomUUID(),now=new Date().toISOString();db.prepare("INSERT INTO conversations(id,title,created_at,updated_at) VALUES(?,?,?,?)").run(id,"New chat",now,now);return{id,title:"New chat",created_at:now,updated_at:now};});
+ipcMain.handle("conversations:rename",(_event,raw:unknown)=>{const v=conversationRenameInput.parse(raw);const result=db.prepare("UPDATE conversations SET title=? WHERE id=?").run(v.title,v.conversationId);if(!result.changes)throw new Error("This chat no longer exists.");return true;});
+ipcMain.handle("conversations:remove",(_event,raw:unknown)=>{
+ const v=conversationRef.parse(raw);
+ for(const record of activeStreams.values())if(record.conversationId===v.conversationId){record.cancelled=true;record.controller.abort("removed");}
+ denyApprovals(v.conversationId);cliSessions.delete(v.conversationId);
+ return Boolean(db.prepare("DELETE FROM conversations WHERE id=?").run(v.conversationId).changes);
+});
 ipcMain.handle("messages:list",(_event,id:unknown)=>{if(typeof id!=="string"||!z.string().uuid().safeParse(id).success)throw new Error("Invalid conversation.");return db.prepare("SELECT id,role,content,connection_id,model_id,created_at,kind,meta FROM messages WHERE conversation_id=? ORDER BY created_at,rowid").all(id);});
 ipcMain.handle("chat:send",async(event,raw:unknown)=>{
  const parsed=chatInput.safeParse(raw);if(!parsed.success)throw new Error(parsed.error.issues[0]?.message??"Invalid message.");
@@ -363,10 +372,11 @@ ipcMain.handle("chat:send",async(event,raw:unknown)=>{
  const cliActive=Boolean(cliSessions.get(v.conversationId)?.enabled),workspace=workspaceFor(v.conversationId);
  if(cliActive&&!validWorkspace(workspace))throw new Error("The CLI workspace folder is missing. Choose another folder in the composer.");
  const transcript=historyTranscript(v.conversationId);transcript.push({role:"user",content:v.content});
- insertMessage(v.conversationId,"user",v.content,"text",null,row.id,model.id);
- const timeoutMs=cliActive?30*60*1000:180000,controller=new AbortController(),timeout=setTimeout(()=>controller.abort("timeout"),timeoutMs),record:StreamRecord={controller,cancelled:false};
+ const timeoutMs=cliActive?30*60*1000:180000,controller=new AbortController(),timeout=setTimeout(()=>controller.abort("timeout"),timeoutMs),record:StreamRecord={controller,cancelled:false,conversationId:v.conversationId};
  activeStreams.set(v.requestId,record);
  try{
+  if(!conversationExists(v.conversationId))return{ok:true,cancelled:true};
+  insertMessage(v.conversationId,"user",v.content,"text",null,row.id,model.id);
   if(cliActive){
    await runCliTurn(event,row,model,key,v.requestId,v.conversationId,workspace!,controller.signal,transcript);
   }else{
@@ -375,6 +385,7 @@ ipcMain.handle("chat:send",async(event,raw:unknown)=>{
   }
   touchConversation(v.conversationId,v.content);return{ok:true};
  }catch(error){
+  if(!conversationExists(v.conversationId))return{ok:true,cancelled:true};
   if(error instanceof StreamCancelledError&&record.cancelled){
    const partial=stripCliBlocks(error.partial);
    if(partial)insertMessage(v.conversationId,"assistant",partial,"text",null,row.id,model.id);

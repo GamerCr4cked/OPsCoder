@@ -1,90 +1,532 @@
-import {useCallback,useEffect,useMemo,useRef,useState} from "react";
-import {Activity,Ban,Bot,Boxes,Check,ChevronDown,FolderOpen,MessageSquare,Plug,Plus,RefreshCw,Send,Settings,ShieldCheck,Square,Terminal,Trash2,Waves,X,Zap} from "lucide-react";
-type Page="chat"|"connections"|"models"|"settings";
-type Message={id:string;role:"user"|"assistant";content:string;kind?:string;meta?:string|null};
-type CliMeta={output?:string;exitCode?:number|null;cwd?:string;denied?:boolean;timedOut?:boolean;truncated?:boolean};
-const uid=()=>crypto.randomUUID();
-const folderName=(path:string)=>path.split(/[\\/]/).filter(Boolean).pop()??path;
-const parseMeta=(value:string|null|undefined):CliMeta=>{try{return value?JSON.parse(value):{};}catch{return{};}};
-function CliCard({message}:{message:Message}){
- const meta=parseMeta(message.meta),denied=Boolean(meta.denied);
- return <article className="cli-card">
-  <div className="cli-card-head"><span className="cli-card-icon"><Terminal size={14}/></span><b>{denied?"Command denied":"Command"}</b>{!denied&&<span className={"exit-badge "+(meta.exitCode===0?"ok":"bad")}>exit {meta.exitCode??"?"}</span>}{meta.timedOut&&<span className="exit-badge bad">timed out</span>}{meta.truncated&&<span className="exit-badge">truncated</span>}{meta.cwd&&<span className="cli-cwd" title={meta.cwd}>{folderName(meta.cwd)}</span>}</div>
-  <pre className="cli-command"><span>$</span> {message.content}</pre>
-  {denied?<p className="cli-denied">You denied this command.</p>:<pre className="cli-output">{meta.output?.trim()||"(no output)"}</pre>}
- </article>;
-}
-export default function App(){
- const [page,setPage]=useState<Page>("chat"),[connections,setConnections]=useState<Connection[]>([]),[activeId,setActiveId]=useState(""),[showAdd,setShowAdd]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState("");
- const [provider,setProvider]=useState<"opencode-zen"|"custom">("opencode-zen"),[name,setName]=useState(""),[apiKey,setApiKey]=useState(""),[baseUrl,setBaseUrl]=useState(""),[modelId,setModelId]=useState(""),[renamingId,setRenamingId]=useState(""),[renameValue,setRenameValue]=useState("");
- const [models,setModels]=useState<ChatModel[]>([]),[modelsBusy,setModelsBusy]=useState(false),[manualModel,setManualModel]=useState("");
- const [conversations,setConversations]=useState<Conversation[]>([]),[conversationId,setConversationId]=useState(""),[messages,setMessages]=useState<Message[]>([]),[draft,setDraft]=useState(""),[sending,setSending]=useState(false),[activeRequestId,setActiveRequestId]=useState("");
- const [cliStatus,setCliStatus]=useState<CliStatus>({enabled:false,workspace:null,autoApprove:false}),[approval,setApproval]=useState<CliApproval|null>(null),[cliActivity,setCliActivity]=useState<{command:string;status:"running"|"done"|"denied";exitCode?:number|null}|null>(null);
- const scrollRef=useRef<HTMLDivElement>(null);
- const errorTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
- const conversationRef=useRef(conversationId);
- const liveChatRef=useRef("");
- const active=useMemo(()=>connections.find(c=>c.id===activeId),[connections,activeId]);
- const selectedModel=useMemo(()=>models.find(m=>m.id===active?.model_id)??models[0],[models,active]);
- const refresh=useCallback(async()=>{try{const items=await window.opscoder.connections.list();setConnections(items);setActiveId(cur=>items.some(c=>c.id===cur)?cur:(items[0]?.id??""));}catch(e){setError(e instanceof Error?e.message:"Could not load connections.");}},[]);
- const loadConversations=useCallback(async()=>{try{const items=await window.opscoder.conversations.list();setConversations(items);if(items.length){setConversationId(items[0].id);setMessages(await window.opscoder.messages.list(items[0].id));}else{const c=await window.opscoder.conversations.create();setConversations([c]);setConversationId(c.id);setMessages([]);}}catch(e){setError(e instanceof Error?e.message:"Could not load chats.");}},[]);
- useEffect(()=>{void refresh();void loadConversations();},[refresh,loadConversations]);
- useEffect(()=>{if(!error)return;if(errorTimer.current)clearTimeout(errorTimer.current);errorTimer.current=setTimeout(()=>setError(""),20000);return()=>{if(errorTimer.current)clearTimeout(errorTimer.current);};},[error]);
- useEffect(()=>{conversationRef.current=conversationId;},[conversationId]);
- const refreshCliStatus=useCallback(async(id:string)=>{if(!id){setCliStatus({enabled:false,workspace:null,autoApprove:false});return;}try{const next=await window.opscoder.cli.status(id);if(conversationRef.current===id)setCliStatus(next);}catch(e){setError(e instanceof Error?e.message:"Could not load CLI status.");}},[]);
- useEffect(()=>{void refreshCliStatus(conversationId);setCliActivity(null);},[conversationId,refreshCliStatus]);
- useEffect(()=>{
-  const offApproval=window.opscoder.cli.onApproval(payload=>{setApproval(payload);setCliActivity(null);});
-  const offResult=window.opscoder.cli.onResult(payload=>{if(payload.conversationId!==conversationRef.current)return;setCliActivity({command:payload.command,status:payload.running?"running":payload.denied?"denied":"done",exitCode:payload.exitCode});});
-  return()=>{offApproval();offResult();};
- },[]);
- const loadModels=useCallback(async(id:string,force=false)=>{if(!id){setModels([]);return;}setModelsBusy(true);setError("");try{const items=await window.opscoder.connections.models(id,force);setModels(items);const conn=connections.find(c=>c.id===id);if(items.length){const current=items.find(m=>m.id===conn?.model_id)??items[0];if(conn?.model_id!==current.id){await window.opscoder.connections.setModel(id,current.id);setConnections(cur=>cur.map(c=>c.id===id?{...c,model_id:current.id}:c));}}}catch(e){setModels([]);setError(e instanceof Error?e.message:"Could not load models. Enter a model ID manually in Models.");}finally{setModelsBusy(false);}},[connections]);
- useEffect(()=>{if(activeId)void loadModels(activeId);else setModels([]);},[activeId,loadModels]);
- useEffect(()=>{scrollRef.current?.scrollTo({top:scrollRef.current.scrollHeight,behavior:"smooth"});},[messages]);
- useEffect(()=>window.opscoder.chat.onChunk(({requestId,delta})=>{if(liveChatRef.current!==conversationRef.current)return;setMessages(cur=>{const index=cur.findIndex(m=>m.id===requestId);if(index<0)return [...cur,{id:requestId,role:"assistant",content:delta,kind:"text",meta:null}];const next=[...cur];next[index]={...next[index],content:next[index].content+delta};return next;});}),[]);
- async function addConnection(){setBusy(true);setError("");try{const matches=connections.filter(c=>c.provider===provider),prefix=provider==="opencode-zen"?"OpenCode Zen":"Custom";const item=await window.opscoder.connections.add({provider,name:name.trim()||(matches.length?prefix+" "+(matches.length+1):prefix),apiKey,baseUrl:provider==="custom"?baseUrl.trim():undefined,protocol:provider==="opencode-zen"?"opencode-zen":"openai-chat-completions",modelId:modelId.trim()||undefined});setConnections(cur=>[...cur,item]);setActiveId(item.id);setShowAdd(false);setApiKey("");setName("");setBaseUrl("");setModelId("");setPage("chat");}catch(e){setError(e instanceof Error?e.message:"Could not save connection.");}finally{setBusy(false);}}
- async function removeConnection(id:string){if(!window.confirm("Remove this connection and its saved API key?"))return;try{await window.opscoder.connections.remove(id);await refresh();if(activeId===id)setModels([]);}catch(e){setError(e instanceof Error?e.message:"Could not remove connection.");}}
- async function newChat(){try{const c=await window.opscoder.conversations.create();setConversations(cur=>[c,...cur]);setConversationId(c.id);setMessages([]);setPage("chat");}catch(e){setError(e instanceof Error?e.message:"Could not create chat.");}}
- async function openChat(id:string){try{setConversationId(id);setMessages(await window.opscoder.messages.list(id));setPage("chat");}catch(e){setError(e instanceof Error?e.message:"Could not open chat.");}}
- async function sendMessage(){const content=draft.trim();if(!content||sending)return;if(!active){setPage("connections");setError("Add or select a connection before sending a message.");return;}const model=selectedModel??(active.model_id?{id:active.model_id,name:active.model_id,protocol:"chat-completions"}:null);if(!model){setPage("models");setError("Select a model before chatting.");return;}const requestId=uid(),chatId=conversationId,user:Message={id:uid(),role:"user",content,kind:"text",meta:null},assistant:Message={id:requestId,role:"assistant",content:"",kind:"text",meta:null};setMessages(cur=>[...cur,user,assistant]);setDraft("");setSending(true);setActiveRequestId(requestId);liveChatRef.current=chatId;setCliActivity(null);setError("");try{await window.opscoder.chat.send({requestId,conversationId:chatId,connectionId:active.id,modelId:model.id,content});}catch(e){setError(e instanceof Error?e.message:"The message could not be sent.");}finally{setSending(false);setActiveRequestId("");setApproval(null);liveChatRef.current="";try{setConversations(await window.opscoder.conversations.list());}catch{}if(conversationRef.current===chatId){try{setMessages(await window.opscoder.messages.list(chatId));}catch{}void refreshCliStatus(chatId);}}}
- async function cancelResponse(){if(!activeRequestId)return;try{await window.opscoder.chat.cancel(activeRequestId);}catch(e){setError(e instanceof Error?e.message:"Could not stop the response.");}}
- async function chooseModel(id:string){if(!active||!id)return;try{await window.opscoder.connections.setModel(active.id,id);setConnections(cur=>cur.map(c=>c.id===active.id?{...c,model_id:id}:c));}catch(e){setError(e instanceof Error?e.message:"Could not save model selection.");}}
- async function toggleCli(){
-  if(!conversationId||(sending&&!cliStatus.enabled))return;
-  try{
-   if(cliStatus.enabled){setCliStatus(await window.opscoder.cli.disable(conversationId));setApproval(null);setCliActivity(null);}
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Check, ChevronDown, Plus, RefreshCw, Settings, Sparkles, Terminal, X } from "lucide-react";
+import ChatView from "./components/ChatView";
+import { AddConnectionModal, ApprovalModal, ConfirmModal, RenameChatModal, RenameConnectionModal } from "./components/Modals";
+import { Sidebar } from "./components/Sidebar";
+import SettingsView from "./components/SettingsView";
+import { loadTheme, saveTheme, type ThemeSettings } from "./theme";
+import type { CliActivity, Message, Page, SettingsTab } from "./types";
+
+type ConfirmState = { kind: "chat"; chat: Conversation } | { kind: "connection"; connection: Connection };
+const IDENTITY_NAME = "ITzGamerCracked_";
+const IDENTITY_HANDLE = "GC";
+const uid = () => crypto.randomUUID();
+
+export default function App() {
+ const [page, setPage] = useState<Page>("chat");
+ const [settingsTab, setSettingsTab] = useState<SettingsTab>("appearance");
+ const [theme, setTheme] = useState<ThemeSettings>(() => loadTheme());
+ const [sidebarCollapsed, setSidebarCollapsed] = useState(() => { try { return localStorage.getItem("opscoder.sidebar") === "1"; } catch { return false; } });
+
+ const [connections, setConnections] = useState<Connection[]>([]);
+ const [activeId, setActiveId] = useState("");
+ const [models, setModels] = useState<ChatModel[]>([]);
+ const [modelsBusy, setModelsBusy] = useState(false);
+ const [manualModel, setManualModel] = useState("");
+ const [showAdd, setShowAdd] = useState(false);
+ const [busy, setBusy] = useState(false);
+ const [provider, setProvider] = useState<"opencode-zen" | "custom">("opencode-zen");
+ const [name, setName] = useState("");
+ const [apiKey, setApiKey] = useState("");
+ const [baseUrl, setBaseUrl] = useState("");
+ const [modelId, setModelId] = useState("");
+ const [renamingConnection, setRenamingConnection] = useState<Connection | null>(null);
+ const [renameConnectionValue, setRenameConnectionValue] = useState("");
+
+ const [conversations, setConversations] = useState<Conversation[]>([]);
+ const [conversationId, setConversationId] = useState("");
+ const [messages, setMessages] = useState<Message[]>([]);
+ const [sending, setSending] = useState(false);
+ const [activeRequestId, setActiveRequestId] = useState("");
+ const [renamingChat, setRenamingChat] = useState<Conversation | null>(null);
+ const [renameChatValue, setRenameChatValue] = useState("");
+ const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+ const [confirmBusy, setConfirmBusy] = useState(false);
+
+ const [cliStatus, setCliStatus] = useState<CliStatus>({ enabled: false, workspace: null, autoApprove: false });
+ const [approval, setApproval] = useState<CliApproval | null>(null);
+ const [cliActivity, setCliActivity] = useState<CliActivity | null>(null);
+ const [modelMenuOpen, setModelMenuOpen] = useState(false);
+ const [error, setError] = useState("");
+
+ const errorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+ const conversationRef = useRef(conversationId);
+ const conversationsRef = useRef<Conversation[]>([]);
+ const messagesRef = useRef<Message[]>([]);
+ const sendingRef = useRef(false);
+ const liveChatRef = useRef("");
+ const connectionsRef = useRef<Connection[]>([]);
+ const pendingChunks = useRef(new Map<string, string>());
+ const rafRef = useRef<number | null>(null);
+ const initialized = useRef(false);
+
+ const active = useMemo(() => connections.find(connection => connection.id === activeId), [connections, activeId]);
+ const selectedModel = useMemo(() => models.find(model => model.id === active?.model_id) ?? models[0] ?? null, [models, active]);
+ const activeChat = useMemo(() => conversations.find(chat => chat.id === conversationId), [conversations, conversationId]);
+
+ useEffect(() => { conversationRef.current = conversationId; }, [conversationId]);
+ useEffect(() => { conversationsRef.current = conversations; }, [conversations]);
+ useEffect(() => { messagesRef.current = messages; }, [messages]);
+ useEffect(() => { sendingRef.current = sending; }, [sending]);
+ useEffect(() => { connectionsRef.current = connections; }, [connections]);
+ useEffect(() => { try { localStorage.setItem("opscoder.sidebar", sidebarCollapsed ? "1" : "0"); } catch { /* Ignore storage failures. */ } }, [sidebarCollapsed]);
+ useEffect(() => { if (!error) return; if (errorTimer.current) clearTimeout(errorTimer.current); errorTimer.current = setTimeout(() => setError(""), 18000); return () => { if (errorTimer.current) clearTimeout(errorTimer.current); }; }, [error]);
+ useEffect(() => () => { if (rafRef.current !== null) cancelAnimationFrame(rafRef.current); }, []);
+
+ const refresh = useCallback(async () => {
+  try {
+   const items = await window.opscoder.connections.list();
+   setConnections(items);
+   setActiveId(current => items.some(connection => connection.id === current) ? current : items[0]?.id ?? "");
+  } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not load connections."); }
+ }, []);
+
+ const loadConversations = useCallback(async () => {
+  try {
+   const items = await window.opscoder.conversations.list();
+   setConversations(items);
+   if (items.length) {
+    setConversationId(items[0].id);
+    setMessages(await window.opscoder.messages.list(items[0].id));
+   } else {
+    const chat = await window.opscoder.conversations.create();
+    setConversations([chat]);
+    setConversationId(chat.id);
+    setMessages([]);
+   }
+  } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not load chats."); }
+ }, []);
+
+ useEffect(() => {
+  if (initialized.current) return;
+  initialized.current = true;
+  void refresh();
+  void loadConversations();
+ }, [refresh, loadConversations]);
+
+ const loadModels = useCallback(async (id: string, force = false) => {
+  if (!id) { setModels([]); return; }
+  setModelsBusy(true);
+  setError("");
+  try {
+   const items = await window.opscoder.connections.models(id, force);
+   setModels(items);
+   if (items.length) {
+    const connection = connectionsRef.current.find(item => item.id === id);
+    if (!items.some(model => model.id === connection?.model_id)) {
+     const current = items[0];
+     await window.opscoder.connections.setModel(id, current.id);
+     setConnections(currentConnections => currentConnections.map(item => item.id === id ? { ...item, model_id: current.id } : item));
+    }
+   }
+  } catch (caught) {
+   setModels([]);
+   setError(caught instanceof Error ? caught.message : "Could not load models. Add a model ID manually in Settings.");
+  } finally { setModelsBusy(false); }
+ }, []);
+
+ useEffect(() => { if (activeId) void loadModels(activeId); else setModels([]); }, [activeId, loadModels]);
+
+ const refreshCliStatus = useCallback(async (id: string) => {
+  if (!id) { setCliStatus({ enabled: false, workspace: null, autoApprove: false }); return; }
+  try {
+   const next = await window.opscoder.cli.status(id);
+   if (conversationRef.current === id) setCliStatus(next);
+  } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not load CLI status."); }
+ }, []);
+
+ useEffect(() => { void refreshCliStatus(conversationId); setCliActivity(null); }, [conversationId, refreshCliStatus]);
+
+ const flushChunks = useCallback(() => {
+  if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+  const batch = pendingChunks.current;
+  if (!batch.size) return;
+  pendingChunks.current = new Map();
+  if (liveChatRef.current !== conversationRef.current) return;
+  setMessages(current => {
+   let next = current;
+   for (const [requestId, delta] of batch) {
+    const index = next.findIndex(message => message.id === requestId);
+    if (index < 0) next = [...next, { id: requestId, role: "assistant", content: delta, kind: "text", meta: null }];
+    else {
+     next = [...next];
+     next[index] = { ...next[index], content: next[index].content + delta };
+    }
+   }
+   return next;
+  });
+ }, []);
+
+ const queueChunk = useCallback((requestId: string, delta: string) => {
+  const current = pendingChunks.current.get(requestId) ?? "";
+  pendingChunks.current.set(requestId, current + delta);
+  if (rafRef.current === null) rafRef.current = requestAnimationFrame(() => { rafRef.current = null; flushChunks(); });
+ }, [flushChunks]);
+
+ const clearPendingChunks = useCallback(() => {
+  pendingChunks.current.clear();
+  if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+ }, []);
+
+ useEffect(() => window.opscoder.chat.onChunk(({ requestId, delta }) => {
+  if (liveChatRef.current !== conversationRef.current) return;
+  queueChunk(requestId, delta);
+ }), [queueChunk]);
+
+ useEffect(() => {
+  const offApproval = window.opscoder.cli.onApproval(payload => { setApproval(payload); setCliActivity(null); });
+  const offResult = window.opscoder.cli.onResult(payload => {
+   if (payload.conversationId !== conversationRef.current) return;
+   setCliActivity({ command: payload.command, status: payload.running ? "running" : payload.denied ? "denied" : "done", exitCode: payload.exitCode });
+  });
+  return () => { offApproval(); offResult(); };
+ }, []);
+
+ const stopActiveStream = useCallback(() => {
+  if (sending && activeRequestId) void window.opscoder.chat.cancel(activeRequestId);
+ }, [sending, activeRequestId]);
+
+ const newChat = useCallback(async () => {
+  setModelMenuOpen(false);
+  setPage("chat");
+  const current = conversationsRef.current.find(chat => chat.id === conversationRef.current);
+  if (!sendingRef.current && current?.title === "New chat" && !messagesRef.current.length) return;
+  stopActiveStream();
+  clearPendingChunks();
+  setApproval(null);
+  setCliActivity(null);
+  try {
+   const chat = await window.opscoder.conversations.create();
+   setConversations(current => [chat, ...current]);
+   setConversationId(chat.id);
+   setMessages([]);
+  } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not create a chat."); }
+ }, [stopActiveStream, clearPendingChunks]);
+
+ const openChat = useCallback(async (id: string) => {
+  if (id === conversationRef.current) { setPage("chat"); return; }
+  stopActiveStream();
+  clearPendingChunks();
+  setApproval(null);
+  setCliActivity(null);
+  setModelMenuOpen(false);
+  try {
+   setConversationId(id);
+   setMessages(await window.opscoder.messages.list(id));
+   setPage("chat");
+  } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not open that chat."); }
+ }, [stopActiveStream, clearPendingChunks]);
+
+ const sendMessage = useCallback((content: string) => {
+  const text = content.trim();
+  if (!text || sending) return false;
+  if (!conversationId) return false;
+  if (!active) { setSettingsTab("connections"); setPage("settings"); setError("Add or select a connection before sending a message."); return false; }
+  const fallback: ChatModel = { id: active.model_id ?? "", name: active.model_id ?? "", protocol: "chat-completions", free: false };
+  const model = selectedModel ?? (active.model_id ? fallback : null);
+  if (!model) { setSettingsTab("models"); setPage("settings"); setError("Select a model before chatting."); return false; }
+  const requestId = uid(), chatId = conversationId, startedInCli = cliStatus.enabled;
+  const user: Message = { id: uid(), role: "user", content: text, kind: "text", meta: null };
+  const assistant: Message = { id: requestId, role: "assistant", content: "", kind: "text", meta: null };
+  setMessages(current => [...current, user, assistant]);
+  setSending(true);
+  setActiveRequestId(requestId);
+  liveChatRef.current = chatId;
+  setCliActivity(null);
+  setError("");
+  void (async () => {
+   let failed = false, reload = startedInCli;
+   try {
+    const result = await window.opscoder.chat.send({ requestId, conversationId: chatId, connectionId: active.id, modelId: model.id, content: text });
+    if (result.cancelled) reload = true;
+   }
+   catch (caught) { failed = true; setError(caught instanceof Error ? caught.message : "The message could not be sent."); }
+   finally {
+    flushChunks();
+    setSending(false);
+    setActiveRequestId("");
+    setApproval(null);
+    liveChatRef.current = "";
+    try { setConversations(await window.opscoder.conversations.list()); } catch { /* Keep the current list. */ }
+    if (conversationRef.current === chatId) {
+     if (failed || reload) { try { setMessages(await window.opscoder.messages.list(chatId)); } catch { /* Keep the streamed view. */ } }
+     void refreshCliStatus(chatId);
+    }
+   }
+  })();
+  return true;
+ }, [active, selectedModel, sending, conversationId, cliStatus.enabled, flushChunks, refreshCliStatus]);
+
+ const cancelResponse = useCallback(async () => {
+  if (!activeRequestId) return;
+  try { await window.opscoder.chat.cancel(activeRequestId); }
+  catch (caught) { setError(caught instanceof Error ? caught.message : "Could not stop the response."); }
+ }, [activeRequestId]);
+
+ const chooseModel = useCallback(async (id: string) => {
+  if (!active || !id) return;
+  try {
+   await window.opscoder.connections.setModel(active.id, id);
+   setConnections(current => current.map(connection => connection.id === active.id ? { ...connection, model_id: id } : connection));
+  } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not save the model selection."); }
+ }, [active]);
+
+ const saveManualModel = useCallback(async () => {
+  const id = manualModel.trim();
+  if (!active || !id) return;
+  try {
+   await window.opscoder.connections.addModel(active.id, id);
+   await chooseModel(id);
+   setModels(current => current.some(model => model.id === id) ? current : [...current, { id, name: id, protocol: "chat-completions", free: false }]);
+   setManualModel("");
+  } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not save this model ID."); }
+ }, [active, manualModel, chooseModel]);
+
+ const changeTheme = useCallback((next: ThemeSettings) => { setTheme(next); saveTheme(next); }, []);
+ const openSettings = useCallback((tab: SettingsTab) => { setSettingsTab(tab); setPage("settings"); setModelMenuOpen(false); }, []);
+ const toggleSidebar = useCallback(() => setSidebarCollapsed(value => !value), []);
+ const handleNewChat = useCallback(() => { void newChat(); }, [newChat]);
+ const handleOpenChat = useCallback((id: string) => { void openChat(id); }, [openChat]);
+ const handleRenameChat = useCallback((chat: Conversation) => { setRenamingChat(chat); setRenameChatValue(chat.title); }, []);
+ const handleDeleteChat = useCallback((chat: Conversation) => setConfirm({ kind: "chat", chat }), []);
+
+ const toggleCli = useCallback(async () => {
+  if (!conversationId || (sending && !cliStatus.enabled)) return;
+  try {
+   if (cliStatus.enabled) { setCliStatus(await window.opscoder.cli.disable(conversationId)); setApproval(null); setCliActivity(null); }
    else setCliStatus(await window.opscoder.cli.enable(conversationId));
-  }catch(e){setError(e instanceof Error?e.message:"Could not change CLI mode.");}
- }
- async function changeWorkspace(){if(!conversationId)return;try{setCliStatus(await window.opscoder.cli.chooseWorkspace(conversationId));}catch(e){setError(e instanceof Error?e.message:"Could not change the CLI workspace.");}}
- async function toggleAutoApprove(enabled:boolean){if(!conversationId)return;try{setCliStatus(await window.opscoder.cli.setAutoApprove(conversationId,enabled));}catch(e){setError(e instanceof Error?e.message:"Could not change command approval.");}}
- async function decideCli(decision:"once"|"always"|"deny"){
-  if(!approval)return;
-  const current=approval;setApproval(null);setCliActivity({command:current.command,status:decision==="deny"?"denied":"running"});
-  try{await window.opscoder.cli.decide(current.approvalId,decision);await refreshCliStatus(current.conversationId);}catch(e){setError(e instanceof Error?e.message:"Could not send the approval decision.");}
- }
- async function saveManualModel(){const id=manualModel.trim();if(!active||!id)return;try{await window.opscoder.connections.addModel(active.id,id);await chooseModel(id);setModels(cur=>cur.some(m=>m.id===id)?cur:[...cur,{id,name:id,protocol:"chat-completions",free:false}]);setManualModel("");}catch(e){setError(e instanceof Error?e.message:"Could not save this model ID.");}}
- async function renameConnection(){if(!renamingId||!renameValue.trim())return;try{await window.opscoder.connections.rename(renamingId,renameValue.trim());setConnections(cur=>cur.map(c=>c.id===renamingId?{...c,name:renameValue.trim()}:c));setRenamingId("");setRenameValue("");}catch(e){setError(e instanceof Error?e.message:"Could not rename connection.");}}
- return <div className="shell"><aside className="sidebar">
-  <div className="brand"><span className="brand-icon"><Waves size={20}/></span>OPsCoder</div><button className="new-chat" onClick={()=>void newChat()}><Plus size={16}/>New chat</button>
-  <nav><button className={page==="chat"?"active":""} onClick={()=>setPage("chat")}><MessageSquare size={17}/>Chats</button><button className={page==="connections"?"active":""} onClick={()=>setPage("connections")}><Plug size={17}/>Connections</button><button className={page==="models"?"active":""} onClick={()=>setPage("models")}><Boxes size={17}/>Models</button><button className={page==="settings"?"active":""} onClick={()=>setPage("settings")}><Settings size={17}/>Settings</button></nav>
-  <div className="side-caption">RECENT CHATS<button onClick={()=>void newChat()} aria-label="New chat"><Plus size={14}/></button></div><div className="connection-list">{conversations.map(c=><button key={c.id} className={conversationId===c.id?"connection active-connection":"connection"} onClick={()=>void openChat(c.id)}><MessageSquare size={13}/><span>{c.title}</span></button>)}</div>
-  <div className="side-caption">CONNECTIONS<button onClick={()=>setShowAdd(true)} aria-label="Add connection"><Plus size={14}/></button></div><div className="connection-list">{connections.map(c=><button key={c.id} className={activeId===c.id?"connection active-connection":"connection"} onClick={()=>{setActiveId(c.id);setPage("chat");}}><i/>{c.name}</button>)}{!connections.length&&<p className="muted">No connections yet</p>}</div><div className="sidebar-bottom"><ShieldCheck size={15}/>Local encrypted storage</div>
- </aside><main><header><span>{page==="chat"?"Chat":page[0].toUpperCase()+page.slice(1)}</span><span className="top-note"><Activity size={14}/>{active?active.name:"No active connection"}</span></header>
- {page==="chat"&&<section className="chat-page"><div className="messages" ref={scrollRef}>
-  {!messages.length&&<div className="chat-empty"><div className="hero-icon"><Bot size={27}/></div><h1>What are we building today?</h1><p>Choose a model and start a conversation.</p>{!active&&<button className="primary" onClick={()=>setShowAdd(true)}><Plus size={16}/>Connect a provider</button>}</div>}
-  {messages.map(m=>m.kind==="cli"?<CliCard key={m.id} message={m}/>:<article className={"message "+m.role} key={m.id}><div className="message-avatar">{m.role==="assistant"?<Bot size={17}/>:<span>Y</span>}</div><div className="message-body"><div className="message-label">{m.role==="assistant"?"OPsCoder":"You"}</div><div className="message-text">{m.content||(sending?"Thinking…":"")}</div></div></article>)}
- </div><div className="composer-wrap">{cliActivity&&<div className={"cli-activity "+cliActivity.status}><Terminal size={14}/><span>{cliActivity.status==="running"?"Running":cliActivity.status==="denied"?"Denied":"Finished"}</span><code>{cliActivity.command}</code>{cliActivity.status==="done"&&cliActivity.exitCode!==undefined&&<b>exit {cliActivity.exitCode??"?"}</b>}</div>}<div className="composer-meta">
-  <label className="select-wrap"><span>Connection</span><select value={activeId} onChange={e=>setActiveId(e.target.value)}><option value="">Select connection</option>{connections.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select><ChevronDown size={13}/></label>
-  <label className="select-wrap"><span>Model</span><select value={selectedModel?.id??active?.model_id??""} onChange={e=>void chooseModel(e.target.value)} disabled={!active||(!models.length&&!active.model_id)}><option value="">{modelsBusy?"Loading models…":"Select model"}</option>{models.map(m=><option key={m.id} value={m.id}>{m.name}{m.free?" · FREE":""}</option>)}{active?.model_id&&!models.some(m=>m.id===active.model_id)&&<option value={active.model_id}>{active.model_id}</option>}</select><ChevronDown size={13}/></label><button className="icon-button" title="Refresh models" onClick={()=>active&&void loadModels(active.id,true)} disabled={!active||modelsBusy}><RefreshCw size={14}/></button>
- </div><form className="composer" onSubmit={e=>{e.preventDefault();void sendMessage();}}><textarea value={draft} onChange={e=>setDraft(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();void sendMessage();}}} placeholder={active?(cliStatus.enabled?"Message OPsCoder in CLI mode…":"Message OPsCoder…"):"Connect a provider to start chatting"} rows={2} disabled={!active||sending}/><div className="composer-tools"><button type="button" className={"cli-toggle "+(cliStatus.enabled?"on":"")} onClick={()=>void toggleCli()} disabled={sending&&!cliStatus.enabled} title={cliStatus.enabled?"Turn off CLI mode":"Let the model run commands in a folder"}><Terminal size={13}/>CLI</button>{cliStatus.enabled&&cliStatus.workspace&&<button type="button" className="cli-chip" onClick={()=>void changeWorkspace()} disabled={sending} title={"Workspace: "+cliStatus.workspace}><FolderOpen size={12}/>{folderName(cliStatus.workspace)}</button>}{cliStatus.enabled&&(cliStatus.autoApprove?<span className="cli-auto"><ShieldCheck size={12}/>Auto-approve<button type="button" onClick={()=>void toggleAutoApprove(false)} title="Review every command again" aria-label="Stop auto-approving commands"><X size={11}/></button></span>:<span className="cli-review"><ShieldCheck size={12}/>Ask every command</span>)}</div>{sending?<button type="button" className="send-button stop-button" onClick={()=>void cancelResponse()} aria-label="Stop response" title="Stop response"><Square size={13} fill="currentColor"/></button>:<button className="send-button" disabled={!draft.trim()||!active} aria-label="Send message"><Send size={17}/></button>}</form><p className="composer-hint">{cliStatus.enabled?"CLI mode runs commands in "+folderName(cliStatus.workspace??"")+" — each command needs your approval unless auto-approved.":"Enter to send · Shift + Enter for a new line · Responses stream from your provider"}</p></div></section>}
- {page==="connections"&&<section className="content"><div className="heading"><div><h1>Connections</h1><p>Manage API credentials saved on this device.</p></div><button className="primary" onClick={()=>setShowAdd(true)}><Plus size={16}/>Add connection</button></div>{connections.map(c=><article className="connection-card" key={c.id}><div className="provider-icon">{c.provider==="opencode-zen"?<Zap size={20}/>:<Plug size={20}/>}</div><div className="provider-details"><b>{c.name}</b><small>{c.provider==="opencode-zen"?"OpenCode Zen":"Custom OpenAI-compatible API"} · {c.model_id||"Model not selected"}</small></div>{activeId===c.id&&<span className="tag">Active</span>}<button className="secondary" onClick={()=>{setRenamingId(c.id);setRenameValue(c.name);}} title="Rename connection">Rename</button><button className="remove" onClick={()=>void removeConnection(c.id)} aria-label={"Remove "+c.name}><Trash2 size={16}/></button><button className="secondary" onClick={()=>{setActiveId(c.id);setPage("chat");}}>Use</button></article>)}{!connections.length&&<div className="empty">No connections have been added yet.</div>}</section>}
- {page==="models"&&<section className="content"><div className="heading"><div><h1>Models</h1><p>Discover models supported by your selected connection.</p></div><button className="secondary" onClick={()=>active&&void loadModels(active.id,true)} disabled={!active||modelsBusy}><RefreshCw size={14}/> Refresh</button></div><div className="model-toolbar"><label>Active connection<select value={activeId} onChange={e=>setActiveId(e.target.value)}><option value="">Select connection</option>{connections.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></label></div>{modelsBusy&&<div className="empty">Loading available models…</div>}{!modelsBusy&&models.map(m=><button key={m.id} className={"model-card "+(active?.model_id===m.id?"model-selected":"")} onClick={()=>void chooseModel(m.id)}><div className="provider-icon"><Boxes size={18}/></div><span><b>{m.name}</b><small>{m.id} · {m.protocol}</small></span>{m.free&&<span className="free-tag">FREE</span>}{active?.model_id===m.id&&<span className="tag">Selected</span>}</button>)}{active&&<div className="manual-model"><b>Use a model ID manually</b><p>Useful when a Custom API does not expose a model catalogue.</p><div><input value={manualModel} onChange={e=>setManualModel(e.target.value)} placeholder="e.g. gpt-4o-mini"/><button className="primary" onClick={()=>void saveManualModel()} disabled={!manualModel.trim()}>Save model</button></div></div>}{!active&&<div className="empty">Add or select a connection first.</div>}</section>}
- {page==="settings"&&<section className="content"><div className="heading"><div><h1>Settings</h1><p>OPsCoder desktop preferences.</p></div></div><div className="connection-card"><ShieldCheck size={19}/><span>API keys are encrypted with Electron safeStorage. Renderer processes never receive credentials.</span></div><div className="connection-card"><Bot size={19}/><span>Version {__APP_VERSION__} · Dark appearance</span></div></section>}
- </main>
- {error&&<div className="toast" role="alert"><span>{error}</span><button onClick={()=>setError("")} aria-label="Dismiss error"><X size={14}/></button></div>}
- {renamingId&&<div className="overlay" onMouseDown={e=>{if(e.target===e.currentTarget)setRenamingId("");}}><form className="modal rename-modal" onSubmit={e=>{e.preventDefault();void renameConnection();}}><div className="modal-title"><div><h2>Rename connection</h2><p>Choose a name that helps you identify this connection.</p></div><button type="button" className="close" onClick={()=>setRenamingId("")}><X size={18}/></button></div><label htmlFor="rename-connection">Connection name</label><input id="rename-connection" autoFocus value={renameValue} onChange={e=>setRenameValue(e.target.value)} maxLength={64} required/><div className="modal-actions"><button type="button" className="secondary" onClick={()=>setRenamingId("")}>Cancel</button><button className="primary" disabled={!renameValue.trim()}>Save name</button></div></form></div>}
- {showAdd&&<div className="overlay" onMouseDown={e=>{if(e.target===e.currentTarget&&!busy)setShowAdd(false);}}><form className="modal" onSubmit={e=>{e.preventDefault();void addConnection();}}><div className="modal-title"><div><h2>Add connection</h2><p>Credentials stay inside the desktop main process.</p></div><button type="button" className="close" onClick={()=>setShowAdd(false)}><X size={18}/></button></div><label>Provider</label><div className="tabs"><button type="button" className={provider==="opencode-zen"?"chosen":""} onClick={()=>setProvider("opencode-zen")}><Zap size={14}/>OpenCode Zen</button><button type="button" className={provider==="custom"?"chosen":""} onClick={()=>setProvider("custom")}><Plug size={14}/>Custom</button></div><label htmlFor="connection-name">Connection name <small>Optional</small></label><input id="connection-name" autoFocus value={name} onChange={e=>setName(e.target.value)} maxLength={64} placeholder={provider==="opencode-zen"?"OpenCode Zen":"Custom"}/>{provider==="custom"&&<><label>API base URL</label><input type="url" value={baseUrl} onChange={e=>setBaseUrl(e.target.value)} placeholder="https://api.example.com/v1" required/></>}<label>API key</label><input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)} autoComplete="off" required maxLength={4096}/>{provider==="custom"&&<><label>Model ID <small>Optional</small></label><input value={modelId} onChange={e=>setModelId(e.target.value)} maxLength={200} placeholder="provider/model-name"/></>}<div className="modal-actions"><button type="button" className="secondary" disabled={busy} onClick={()=>setShowAdd(false)}>Cancel</button><button className="primary" disabled={busy||!apiKey.trim()}>{busy?"Saving…":"Save connection"}</button></div><p className="footnote">Connections are stored locally. Provider usage and billing are managed by your provider.</p></form></div>}
- {approval&&<div className="overlay approval-overlay"><div className="modal approval-modal" role="dialog" aria-modal="true" aria-labelledby="cli-approval-title"><div className="modal-title"><div><h2 id="cli-approval-title">Terminal access request</h2><p>OPsCoder wants to run a command in this chat.</p></div><span className="approval-icon"><Terminal size={18}/></span></div><label>Command</label><pre className="approval-command">{approval.command}</pre><p className="approval-cwd"><FolderOpen size={13}/><span>{approval.workspace}</span></p><p className="approval-warning"><ShieldCheck size={13}/>Commands run with your user account. They can read or change files outside this folder.</p><div className="modal-actions approval-actions"><button type="button" className="secondary deny" onClick={()=>void decideCli("deny")}><Ban size={14}/>Deny</button><button type="button" className="secondary" onClick={()=>void decideCli("always")}><ShieldCheck size={14}/>Always allow in this chat</button><button type="button" className="primary" onClick={()=>void decideCli("once")}><Check size={14}/>Allow once</button></div></div></div>}
+  } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not change CLI mode."); }
+ }, [conversationId, sending, cliStatus.enabled]);
+
+ const changeWorkspace = useCallback(async () => {
+  if (!conversationId) return;
+  try { setCliStatus(await window.opscoder.cli.chooseWorkspace(conversationId)); }
+  catch (caught) { setError(caught instanceof Error ? caught.message : "Could not change the CLI workspace."); }
+ }, [conversationId]);
+
+ const toggleAutoApprove = useCallback(async (enabled: boolean) => {
+  if (!conversationId) return;
+  try { setCliStatus(await window.opscoder.cli.setAutoApprove(conversationId, enabled)); }
+  catch (caught) { setError(caught instanceof Error ? caught.message : "Could not change command approval."); }
+ }, [conversationId]);
+
+ const decideCli = useCallback(async (decision: "once" | "always" | "deny") => {
+  if (!approval) return;
+  const current = approval;
+  setApproval(null);
+  setCliActivity({ command: current.command, status: decision === "deny" ? "denied" : "running" });
+  try { await window.opscoder.cli.decide(current.approvalId, decision); await refreshCliStatus(current.conversationId); }
+  catch (caught) { setError(caught instanceof Error ? caught.message : "Could not send the approval decision."); }
+ }, [approval, refreshCliStatus]);
+
+ const closeAdd = () => {
+  if (busy) return;
+  setShowAdd(false);
+  setApiKey("");
+  setName("");
+  setBaseUrl("");
+  setModelId("");
+ };
+
+ const addConnection = async () => {
+  setBusy(true);
+  setError("");
+  try {
+   const matches = connections.filter(connection => connection.provider === provider);
+   const prefix = provider === "opencode-zen" ? "OpenCode Zen" : "Custom";
+   const item = await window.opscoder.connections.add({
+    provider,
+    name: name.trim() || (matches.length ? prefix + " " + (matches.length + 1) : prefix),
+    apiKey,
+    baseUrl: provider === "custom" ? baseUrl.trim() : undefined,
+    protocol: provider === "opencode-zen" ? "opencode-zen" : "openai-chat-completions",
+    modelId: modelId.trim() || undefined
+   });
+   setConnections(current => [...current, item]);
+   setActiveId(item.id);
+   setShowAdd(false);
+   setApiKey("");
+   setName("");
+   setBaseUrl("");
+   setModelId("");
+   setSettingsTab("connections");
+   setPage("settings");
+  } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not save the connection."); }
+  finally { setBusy(false); }
+ };
+
+ const submitRenameConnection = async () => {
+  if (!renamingConnection || !renameConnectionValue.trim()) return;
+  try {
+   await window.opscoder.connections.rename(renamingConnection.id, renameConnectionValue.trim());
+   setConnections(current => current.map(connection => connection.id === renamingConnection.id ? { ...connection, name: renameConnectionValue.trim() } : connection));
+   setRenamingConnection(null);
+  } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not rename the connection."); }
+ };
+
+ const submitRenameChat = async () => {
+  if (!renamingChat || !renameChatValue.trim()) return;
+  try {
+   await window.opscoder.conversations.rename(renamingChat.id, renameChatValue.trim());
+   setConversations(current => current.map(chat => chat.id === renamingChat.id ? { ...chat, title: renameChatValue.trim() } : chat));
+   setRenamingChat(null);
+  } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not rename the chat."); }
+ };
+
+ const runConfirm = async () => {
+  if (!confirm || confirmBusy) return;
+  setConfirmBusy(true);
+  try {
+   if (confirm.kind === "chat") {
+    const chat = confirm.chat;
+    if (chat.id === conversationId && sending && activeRequestId) void window.opscoder.chat.cancel(activeRequestId);
+    await window.opscoder.conversations.remove(chat.id);
+    const remaining = conversations.filter(item => item.id !== chat.id);
+    setConversations(remaining);
+    if (chat.id === conversationId) {
+     clearPendingChunks();
+     setApproval(null);
+     setCliActivity(null);
+     if (remaining.length) {
+      setConversationId(remaining[0].id);
+      setMessages(await window.opscoder.messages.list(remaining[0].id));
+     } else {
+      const fresh = await window.opscoder.conversations.create();
+      setConversations([fresh]);
+      setConversationId(fresh.id);
+      setMessages([]);
+     }
+    }
+   } else {
+    await window.opscoder.connections.remove(confirm.connection.id);
+    await refresh();
+   }
+   setConfirm(null);
+  } catch (caught) { setError(caught instanceof Error ? caught.message : "The action could not be completed."); }
+  finally { setConfirmBusy(false); }
+ };
+
+ useEffect(() => {
+  if (!showAdd && !renamingConnection && !renamingChat && !confirm) return;
+  const onKey = (event: KeyboardEvent) => {
+   if (event.key !== "Escape" || busy || confirmBusy) return;
+   setShowAdd(false);
+   setRenamingConnection(null);
+   setRenamingChat(null);
+   setConfirm(null);
+  };
+  window.addEventListener("keydown", onKey);
+  return () => window.removeEventListener("keydown", onKey);
+ }, [showAdd, renamingConnection, renamingChat, confirm, busy, confirmBusy]);
+
+ useEffect(() => {
+  if (!modelMenuOpen) return;
+  const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setModelMenuOpen(false); };
+  window.addEventListener("keydown", onKey);
+  return () => window.removeEventListener("keydown", onKey);
+ }, [modelMenuOpen]);
+
+ return <div className="app-shell">
+  <Sidebar
+   collapsed={sidebarCollapsed}
+   conversations={conversations}
+   activeChatId={conversationId}
+   identityName={IDENTITY_NAME}
+   identityHandle={IDENTITY_HANDLE}
+   onToggle={toggleSidebar}
+   onNewChat={handleNewChat}
+   onOpenChat={handleOpenChat}
+   onRenameChat={handleRenameChat}
+   onDeleteChat={handleDeleteChat}
+   onOpenSettings={openSettings}
+  />
+
+  <main className="main">
+   <div className="chat-shell" hidden={page !== "chat"}>
+    <header className="main-header">
+     <div className="header-left">
+      <div className="header-title"><b>{activeChat?.title ?? "New chat"}</b>{cliStatus.enabled && <span className="header-cli"><Terminal size={11} />CLI</span>}</div>
+     </div>
+     <div className="header-actions">
+      <div className="model-picker">
+       <button className="model-picker-btn" onClick={() => { if (!active) openSettings("connections"); else setModelMenuOpen(open => !open); }} aria-expanded={modelMenuOpen} title="Choose model">
+        <Sparkles size={14} /><span>{selectedModel?.name ?? active?.model_id ?? (active ? "Select model" : "Connect provider")}</span><ChevronDown size={13} />
+       </button>
+       {modelMenuOpen && <>
+        <div className="popover-scrim" onClick={() => setModelMenuOpen(false)} />
+        <div className="model-popover">
+         <div className="popover-head">
+          <div><small>Connection</small><b>{active?.name ?? "None"}</b></div>
+          <div className="popover-head-actions">
+           <button className="icon-btn" onClick={() => activeId && void loadModels(activeId, true)} disabled={!activeId || modelsBusy} title="Refresh models" aria-label="Refresh models"><RefreshCw size={14} className={modelsBusy ? "spin" : ""} /></button>
+           <button className="icon-btn" onClick={() => openSettings("connections")} title="Manage connections" aria-label="Manage connections"><Settings size={14} /></button>
+          </div>
+         </div>
+         <div className="popover-list">
+          {modelsBusy && <p className="popover-note">Loading models…</p>}
+          {!modelsBusy && !models.length && <p className="popover-note">No models loaded for this connection.</p>}
+          {models.map(model => <button key={model.id} className={"model-option " + (selectedModel?.id === model.id ? "active" : "")} onClick={() => { void chooseModel(model.id); setModelMenuOpen(false); }}>
+           <span>{model.name}</span>
+           {model.free && <span className="free-tag mini">FREE</span>}
+           {selectedModel?.id === model.id && <Check size={14} />}
+          </button>)}
+         </div>
+         <button className="popover-footer" onClick={() => openSettings("models")}>Manage models & connections</button>
+        </div>
+       </>}
+      </div>
+      <button className="icon-btn" onClick={() => void newChat()} title="New chat" aria-label="New chat"><Plus size={18} /></button>
+     </div>
+    </header>
+
+    <ChatView
+     key={conversationId}
+     messages={messages}
+     sending={sending}
+     cliStatus={cliStatus}
+     cliActivity={cliActivity}
+     hasConnection={Boolean(active)}
+     hasModel={Boolean(selectedModel ?? active?.model_id)}
+     identityName={IDENTITY_NAME}
+     identityHandle={IDENTITY_HANDLE}
+     onSend={sendMessage}
+     onStop={() => void cancelResponse()}
+     onToggleCli={() => void toggleCli()}
+     onChangeWorkspace={() => void changeWorkspace()}
+     onSetAutoApprove={enabled => void toggleAutoApprove(enabled)}
+     onOpenSettings={openSettings}
+    />
+   </div>
+
+   {page === "settings" && <SettingsView
+    tab={settingsTab}
+    onTab={setSettingsTab}
+    onBack={() => setPage("chat")}
+    theme={theme}
+    onThemeChange={changeTheme}
+    connections={connections}
+    activeId={activeId}
+    onSetActive={setActiveId}
+    onAddConnection={() => setShowAdd(true)}
+    onRenameConnection={connection => { setRenamingConnection(connection); setRenameConnectionValue(connection.name); }}
+    onRemoveConnection={connection => setConfirm({ kind: "connection", connection })}
+    onUseConnection={id => { setActiveId(id); setPage("chat"); }}
+    models={models}
+    modelsBusy={modelsBusy}
+    onRefreshModels={() => { if (activeId) void loadModels(activeId, true); }}
+    onSelectModel={id => void chooseModel(id)}
+    manualModel={manualModel}
+    onManualModel={setManualModel}
+    onAddManualModel={() => void saveManualModel()}
+   />}
+  </main>
+
+  {showAdd && <AddConnectionModal busy={busy} provider={provider} name={name} apiKey={apiKey} baseUrl={baseUrl} modelId={modelId} onProvider={setProvider} onName={setName} onApiKey={setApiKey} onBaseUrl={setBaseUrl} onModelId={setModelId} onClose={closeAdd} onSubmit={() => void addConnection()} />}
+  {renamingConnection && <RenameConnectionModal title={renamingConnection.name} value={renameConnectionValue} onChange={setRenameConnectionValue} onClose={() => setRenamingConnection(null)} onSubmit={() => void submitRenameConnection()} />}
+  {renamingChat && <RenameChatModal value={renameChatValue} onChange={setRenameChatValue} onClose={() => setRenamingChat(null)} onSubmit={() => void submitRenameChat()} />}
+  {confirm && <ConfirmModal title={confirm.kind === "chat" ? "Delete this chat?" : "Remove this connection?"} message={confirm.kind === "chat" ? "“" + confirm.chat.title + "” and its messages will be permanently deleted." : "“" + confirm.connection.name + "” and its saved API key will be removed. Your chats stay."} confirmLabel={confirm.kind === "chat" ? "Delete chat" : "Remove connection"} busyLabel={confirm.kind === "chat" ? "Deleting…" : "Removing…"} busy={confirmBusy} onClose={() => setConfirm(null)} onConfirm={() => void runConfirm()} />}
+  {approval && <ApprovalModal approval={approval} onDecide={decision => void decideCli(decision)} />}
+
+  {error && <div className="toast" role="alert"><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss error"><X size={14} /></button></div>}
  </div>;
 }

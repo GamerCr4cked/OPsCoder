@@ -14,6 +14,8 @@ interface Window {
   conversations: {
    list: () => Promise<Conversation[]>;
    create: () => Promise<Conversation>;
+   rename: (conversationId: string, title: string) => Promise<boolean>;
+   remove: (conversationId: string) => Promise<boolean>;
   };
   messages: { list: (conversationId: string) => Promise<ChatMessage[]> };
   chat: {

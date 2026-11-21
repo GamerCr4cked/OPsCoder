@@ -11,7 +11,9 @@ contextBridge.exposeInMainWorld("opscoder", {
  },
  conversations: {
   list: () => ipcRenderer.invoke("conversations:list"),
-  create: () => ipcRenderer.invoke("conversations:create")
+  create: () => ipcRenderer.invoke("conversations:create"),
+  rename: (conversationId: string, title: string) => ipcRenderer.invoke("conversations:rename",{conversationId,title}),
+  remove: (conversationId: string) => ipcRenderer.invoke("conversations:remove",{conversationId})
  },
  messages: { list: (conversationId: string) => ipcRenderer.invoke("messages:list",conversationId) },
  chat: {

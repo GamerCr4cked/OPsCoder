@@ -4,9 +4,11 @@ A Windows desktop AI client built with Electron, React and TypeScript.
 
 ## Features
 
+- **Chat-first sidebar**: searchable, date-grouped history with rename and delete, a collapsible rail, and no connection clutter.
 - **Two provider types**: native OpenCode Zen and custom OpenAI-compatible endpoints.
 - **Three wire protocols**: OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages, with streamed SSE output.
 - **Model discovery**: live catalogue loading, free-model tagging, cached results, and manual model IDs for APIs that expose no catalogue.
+- **Themes**: dark, light, or a custom theme with your own accent color. Appearance is saved per device.
 - **Local-first chats**: conversations and messages persist in SQLite and are restored on launch.
 - **Stop an in-flight response** without losing the text already received.
 - **CLI mode**: toggle it in the composer, pick a workspace folder, and let the model inspect and change files by running shell commands. Every command asks for approval, with *Allow once*, *Always allow in this chat* and *Deny*. Auto-approve can be turned off again, and turning CLI mode off clears it.
@@ -57,8 +59,13 @@ Models with native tool calling receive a `run_command` tool. If the protocol do
 | --- | --- |
 | `src/main/index.ts` | App lifecycle, SQLite persistence, credential encryption, IPC validation, provider HTTP and SSE streaming |
 | `src/preload/index.ts` | Restricted `window.opscoder` bridge exposed with `contextBridge` |
-| `src/renderer/src/App.tsx` | Chat, Connections, Models and Settings UI |
-| `src/renderer/src/styles.css` | Dark desktop theme |
+| `src/renderer/src/App.tsx` | App shell, chat state, theme state and IPC orchestration |
+| `src/renderer/src/components/Sidebar.tsx` | Searchable chat history, chat actions and profile footer |
+| `src/renderer/src/components/ChatView.tsx` | Messages, empty state, CLI activity and composer |
+| `src/renderer/src/components/SettingsView.tsx` | Appearance, Connections, Models and About |
+| `src/renderer/src/components/Modals.tsx` | Connection, rename, delete and command-approval dialogs |
+| `src/renderer/src/theme.ts` | Persisted dark, light and custom theme system |
+| `src/renderer/src/styles.css` | Theme variables, layout and component styles |
 | `electron.vite.config.ts` | Main/preload/renderer builds plus the production CSP injection |
 
 ## Security
