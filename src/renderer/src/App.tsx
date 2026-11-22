@@ -327,6 +327,15 @@ export default function App() {
   setName("");
   setBaseUrl("");
   setModelId("");
+  setProvider("opencode-zen");
+ };
+
+ const handleAddPreset = (preset: { name: string; provider: "opencode-zen" | "custom"; baseUrl?: string; defaultModelId?: string }) => {
+  setName(preset.name);
+  setProvider(preset.provider);
+  setBaseUrl(preset.baseUrl || "");
+  setModelId(preset.defaultModelId || "");
+  setShowAdd(true);
  };
 
  const addConnection = async () => {
@@ -350,6 +359,7 @@ export default function App() {
    setName("");
    setBaseUrl("");
    setModelId("");
+   setProvider("opencode-zen");
    setSettingsTab("connections");
    setPage("settings");
   } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not save the connection."); }
@@ -509,6 +519,7 @@ export default function App() {
     activeId={activeId}
     onSetActive={setActiveId}
     onAddConnection={() => setShowAdd(true)}
+    onAddPreset={handleAddPreset}
     onRenameConnection={connection => { setRenamingConnection(connection); setRenameConnectionValue(connection.name); }}
     onRemoveConnection={connection => setConfirm({ kind: "connection", connection })}
     onUseConnection={id => { setActiveId(id); setPage("chat"); }}

@@ -1,9 +1,27 @@
 import { useRef, useState, type ChangeEvent, type CSSProperties, type ReactNode } from "react";
 import { ArrowLeft, Boxes, Check, Info, Moon, Palette, Pencil, Plug, Plus, RefreshCw, RotateCcw, ShieldCheck, Sparkles, Sun, Trash2, Upload, UserRound, Zap } from "lucide-react";
-import { DEFAULT_PROFILE, PROFILE_NAME_MAX, displayName, imageToAvatar, type UserProfile } from "../profile";
 import { ACCENT_PRESETS, type ThemeSettings } from "../theme";
 import type { SettingsTab } from "../types";
+import { DEFAULT_PROFILE, PROFILE_NAME_MAX, displayName, imageToAvatar, type UserProfile } from "../profile";
 import { BrandMark, ProfileAvatar } from "./Brand";
+
+export const CONNECTION_PRESETS: { id: string; name: string; provider: "opencode-zen" | "custom"; protocol: "opencode-zen" | "openai-chat-completions"; baseUrl?: string; icon: ReactNode; description: string; defaultModelId?: string }[] = [
+ { id: "opencode-zen", name: "OpenCode Zen", provider: "opencode-zen", protocol: "opencode-zen", icon: <Zap size={19} />, description: "Native OpenCode Zen integration" },
+ { id: "anthropic-ai", name: "Anthropic", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://api.anthropic.com/v1/", icon: <Zap size={19} />, description: "Claude models", defaultModelId: "claude-sonnet-4-6" },
+ { id: "do", name: "DO (Claude)", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://inference.do-ai.run/v1", icon: <Zap size={19} />, description: "DigitalOcean inference", defaultModelId: "anthropic-claude-4.6-sonnet" },
+ { id: "shannon-ai", name: "Shannon AI", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://api.shannon.ai/v1", icon: <Zap size={19} />, description: "Shannon AI models", defaultModelId: "shannon-v4" },
+ { id: "sirai-ai", name: "Sirai AI", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://api.sirai.ai/v1", icon: <Zap size={19} />, description: "Sirai AI assistant", defaultModelId: "sirai-v3" },
+ { id: "z-ai", name: "Z.AI", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://api.z.ai/api/paas/v4/", icon: <Zap size={19} />, description: "GLM models", defaultModelId: "glm-5.3" },
+ { id: "google-ai", name: "Google AI", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/", icon: <Zap size={19} />, description: "Gemini models", defaultModelId: "gemini-2.5-flash" },
+ { id: "open-ai", name: "OpenAI", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://api.openai.com/v1", icon: <Zap size={19} />, description: "GPT-5 and o-series", defaultModelId: "gpt-5.2" },
+ { id: "groq-ai", name: "Groq AI", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://api.groq.com/openai/v1", icon: <Zap size={19} />, description: "Fast inference", defaultModelId: "llama-3.3-70b-versatile" },
+ { id: "together-ai", name: "Together AI", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://api.together.xyz/v1", icon: <Zap size={19} />, description: "Open-source models", defaultModelId: "meta-llama/Llama-3.3-70B-Instruct-Turbo" },
+ { id: "perplexity-ai", name: "Perplexity AI", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://api.perplexity.ai", icon: <Zap size={19} />, description: "Sonar models", defaultModelId: "sonar" },
+ { id: "deepseek-ai", name: "DeepSeek AI", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://api.deepseek.com", icon: <Zap size={19} />, description: "DeepSeek V3 and R1", defaultModelId: "deepseek-chat" },
+ { id: "x-ai", name: "X.AI (Grok)", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://api.x.ai/v1", icon: <Zap size={19} />, description: "Grok models", defaultModelId: "grok-4" },
+ { id: "mistral-ai", name: "Mistral AI", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://api.mistral.ai/v1", icon: <Zap size={19} />, description: "Mistral and Mixtral", defaultModelId: "mistral-large-latest" },
+ { id: "cohere-ai", name: "Cohere AI", provider: "custom", protocol: "openai-chat-completions", baseUrl: "https://api.cohere.ai/compatibility/v1", icon: <Zap size={19} />, description: "Command models", defaultModelId: "command-a-plus-05-2026" },
+];
 
 type SettingsViewProps = {
  tab: SettingsTab;
@@ -17,6 +35,7 @@ type SettingsViewProps = {
  activeId: string;
  onSetActive: (id: string) => void;
  onAddConnection: () => void;
+ onAddPreset: (preset: typeof CONNECTION_PRESETS[0]) => void;
  onRenameConnection: (connection: Connection) => void;
  onRemoveConnection: (connection: Connection) => void;
  onUseConnection: (id: string) => void;
@@ -32,12 +51,13 @@ type SettingsViewProps = {
 const TABS: { id: SettingsTab; label: string; icon: ReactNode }[] = [
  { id: "profile", label: "Profile", icon: <UserRound size={15} /> },
  { id: "appearance", label: "Appearance", icon: <Palette size={15} /> },
+ { id: "presets", label: "Presets", icon: <Boxes size={15} /> },
  { id: "connections", label: "Connections", icon: <Plug size={15} /> },
  { id: "models", label: "Models", icon: <Boxes size={15} /> },
  { id: "about", label: "About", icon: <Info size={15} /> }
 ];
 
-export default function SettingsView({ tab, onTab, onBack, theme, onThemeChange, profile, onProfileChange, connections, activeId, onSetActive, onAddConnection, onRenameConnection, onRemoveConnection, onUseConnection, models, modelsBusy, onRefreshModels, onSelectModel, manualModel, onManualModel, onAddManualModel }: SettingsViewProps) {
+export default function SettingsView({ tab, onTab, onBack, theme, onThemeChange, profile, onProfileChange, connections, activeId, onSetActive, onAddConnection, onAddPreset, onRenameConnection, onRemoveConnection, onUseConnection, models, modelsBusy, onRefreshModels, onSelectModel, manualModel, onManualModel, onAddManualModel }: SettingsViewProps) {
  const active = connections.find(connection => connection.id === activeId);
  const avatarInput = useRef<HTMLInputElement>(null);
  const [avatarError, setAvatarError] = useState("");
@@ -52,6 +72,7 @@ export default function SettingsView({ tab, onTab, onBack, theme, onThemeChange,
   try { onProfileChange({ ...profile, avatar: await imageToAvatar(file) }); }
   catch (caught) { setAvatarError(caught instanceof Error ? caught.message : "That image could not be used."); }
  };
+
  return <div className="settings-view">
   <div className="settings-inner">
    <header className="settings-header">
@@ -113,6 +134,27 @@ export default function SettingsView({ tab, onTab, onBack, theme, onThemeChange,
      </div>
     </div>}
     <p className="settings-note">Your appearance is saved on this device.</p>
+   </section>}
+
+   {tab === "presets" && <section className="settings-panel">
+    <div className="panel-heading"><h2>Connection Presets</h2><p>Quick-add popular AI providers. Click to add with a default model pre-selected.</p></div>
+    <div className="preset-grid">
+     {CONNECTION_PRESETS.map(preset => {
+      const isActive = connections.some(c => c.provider === preset.provider && c.name === preset.name);
+      return <div key={preset.id} className={"preset-card " + (isActive ? "active" : "")}>
+       <div className="preset-icon">{preset.icon}</div>
+       <div className="preset-info">
+        <b>{preset.name}</b>
+        <small>{preset.description}</small>
+       </div>
+       <button className="btn btn-secondary" onClick={() => onAddPreset(preset)} disabled={isActive}>
+        {isActive ? <Check size={14} /> : <Plus size={14} />}
+        <span>{isActive ? "Added" : "Add"}</span>
+       </button>
+      </div>;
+     })}
+    </div>
+    <p className="settings-note">Presets are added as custom connections. You can edit or remove them from the Connections tab.</p>
    </section>}
 
    {tab === "connections" && <section className="settings-panel">

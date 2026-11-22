@@ -6,6 +6,8 @@ A Windows desktop AI client built with Electron, React and TypeScript.
 
 - **Chat-first sidebar**: searchable, date-grouped history with rename and delete, a collapsible rail, and no connection clutter.
 - **Two provider types**: native OpenCode Zen and custom OpenAI-compatible endpoints.
+- **Connection presets**: quick-add cards for OpenCode Zen, Anthropic, DO, Shannon AI, Sirai AI, Z.AI, Google AI, OpenAI, Groq, Together AI, Perplexity, DeepSeek, xAI, Mistral and Cohere.
+- **Local profile**: set a display name and upload a cropped avatar that appears in the sidebar and on your messages.
 - **Three wire protocols**: OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages, with streamed SSE output.
 - **Model discovery**: live catalogue loading, free-model tagging, cached results, and manual model IDs for APIs that expose no catalogue.
 - **Themes**: dark, light, or a custom theme with your own accent color. Appearance is saved per device.
@@ -62,7 +64,7 @@ Models with native tool calling receive a `run_command` tool. If the protocol do
 | `src/renderer/src/App.tsx` | App shell, chat state, theme state and IPC orchestration |
 | `src/renderer/src/components/Sidebar.tsx` | Searchable chat history, chat actions and profile footer |
 | `src/renderer/src/components/ChatView.tsx` | Messages, empty state, CLI activity and composer |
-| `src/renderer/src/components/SettingsView.tsx` | Appearance, Connections, Models and About |
+| `src/renderer/src/components/SettingsView.tsx` | Profile, appearance, presets, connections, models and about tabs |
 | `src/renderer/src/components/Modals.tsx` | Connection, rename, delete and command-approval dialogs |
 | `src/renderer/src/theme.ts` | Persisted dark, light and custom theme system |
 | `src/renderer/src/styles.css` | Theme variables, layout and component styles |
