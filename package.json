@@ -1,6 +1,6 @@
 {
   "name": "opscoder",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
   "description": "A secure multi-connection desktop AI client",
   "main": "out/main/index.js",
