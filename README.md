@@ -5,8 +5,7 @@ A Windows desktop AI client built with Electron, React and TypeScript.
 ## Features
 
 - **Chat-first sidebar**: searchable, date-grouped history with rename and delete, a collapsible rail, and no connection clutter.
-- **Two provider types**: native OpenCode Zen and custom OpenAI-compatible endpoints.
-- **Connection presets**: quick-add cards for OpenCode Zen, Anthropic, DO, Shannon AI, Sirai AI, Z.AI, Google AI, OpenAI, Groq, Together AI, Perplexity, DeepSeek, xAI, Mistral and Cohere.
+- **Provider tabs in Add Connection**: OpenCode Zen, DO, Shannon AI, Siray AI, Z.AI, Google AI, OpenAI, Groq AI, Anthropic, Together AI, Perplexity AI, DeepSeek AI, X.AI, Mistral AI and Cohere AI, each with its own endpoint and default model. Custom stays one click away in the top corner for any other OpenAI-compatible API.
 - **Local profile**: set a display name and upload a cropped avatar that appears in the sidebar and on your messages.
 - **Three wire protocols**: OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages, with streamed SSE output.
 - **Model discovery**: live catalogue loading, free-model tagging, cached results, and manual model IDs for APIs that expose no catalogue.
@@ -64,7 +63,8 @@ Models with native tool calling receive a `run_command` tool. If the protocol do
 | `src/renderer/src/App.tsx` | App shell, chat state, theme state and IPC orchestration |
 | `src/renderer/src/components/Sidebar.tsx` | Searchable chat history, chat actions and profile footer |
 | `src/renderer/src/components/ChatView.tsx` | Messages, empty state, CLI activity and composer |
-| `src/renderer/src/components/SettingsView.tsx` | Profile, appearance, presets, connections, models and about tabs |
+| `src/renderer/src/components/SettingsView.tsx` | Profile, appearance, connections, models and about tabs |
+| `src/renderer/src/providers.ts` | Provider endpoints, default models and connection labels |
 | `src/renderer/src/components/Modals.tsx` | Connection, rename, delete and command-approval dialogs |
 | `src/renderer/src/theme.ts` | Persisted dark, light and custom theme system |
 | `src/renderer/src/styles.css` | Theme variables, layout and component styles |
@@ -82,7 +82,8 @@ Models with native tool calling receive a `run_command` tool. If the protocol do
 
 ## V1 provider scope
 
-- OpenCode Zen native integration
-- Custom OpenAI-compatible Chat Completions endpoint
+- OpenCode Zen native integration.
+- Built-in provider tabs for popular OpenAI-compatible APIs, with verified endpoints and default models.
+- Custom OpenAI-compatible Chat Completions endpoints.
 
-Other native provider integrations are deferred.
+Named providers are stored as OpenAI-compatible custom connections, so their endpoint remains editable after creation.

@@ -1,14 +1,15 @@
 import type { ReactNode } from "react";
-import { Ban, Check, FolderOpen, Plug, ShieldCheck, Terminal, X, Zap } from "lucide-react";
+import { Ban, Check, FolderOpen, Plug, ShieldCheck, Terminal, X } from "lucide-react";
+import { CUSTOM_PROVIDER, PROVIDER_PRESETS, providerById } from "../providers";
 
 type AddConnectionProps = {
  busy: boolean;
- provider: "opencode-zen" | "custom";
+ providerId: string;
  name: string;
  apiKey: string;
  baseUrl: string;
  modelId: string;
- onProvider: (value: "opencode-zen" | "custom") => void;
+ onProvider: (value: string) => void;
  onName: (value: string) => void;
  onApiKey: (value: string) => void;
  onBaseUrl: (value: string) => void;
@@ -17,26 +18,37 @@ type AddConnectionProps = {
  onSubmit: () => void;
 };
 
-export function AddConnectionModal({ busy, provider, name, apiKey, baseUrl, modelId, onProvider, onName, onApiKey, onBaseUrl, onModelId, onClose, onSubmit }: AddConnectionProps) {
+export function AddConnectionModal({ busy, providerId, name, apiKey, baseUrl, modelId, onProvider, onName, onApiKey, onBaseUrl, onModelId, onClose, onSubmit }: AddConnectionProps) {
+ const selected = providerById(providerId);
+ const isZen = selected.provider === "opencode-zen";
+ const isCustom = selected.id === CUSTOM_PROVIDER.id;
  return <Overlay onClose={busy ? undefined : onClose}>
-  <form className="modal" onSubmit={event => { event.preventDefault(); onSubmit(); }}>
+  <form className="modal add-connection-modal" onSubmit={event => { event.preventDefault(); onSubmit(); }}>
    <div className="modal-title">
-    <div><h2>Add connection</h2><p>Credentials stay inside the desktop main process.</p></div>
-    <button type="button" className="icon-btn" onClick={onClose} disabled={busy} aria-label="Close"><X size={17} /></button>
+    <div><h2>Add connection</h2><p>Pick a provider, or connect any OpenAI-compatible API.</p></div>
+    <div className="modal-title-actions">
+     <button type="button" className={"custom-provider-btn " + (isCustom ? "active" : "")} onClick={() => onProvider(CUSTOM_PROVIDER.id)} aria-pressed={isCustom}><Plug size={13} />Custom</button>
+     <button type="button" className="icon-btn" onClick={onClose} disabled={busy} aria-label="Close"><X size={17} /></button>
+    </div>
    </div>
-   <div className="provider-tabs">
-    <button type="button" className={provider === "opencode-zen" ? "active" : ""} onClick={() => onProvider("opencode-zen")}><Zap size={15} />OpenCode Zen</button>
-    <button type="button" className={provider === "custom" ? "active" : ""} onClick={() => onProvider("custom")}><Plug size={15} />Custom API</button>
+   <div className="provider-tabs" role="tablist" aria-label="AI provider">
+    {PROVIDER_PRESETS.map(preset => <button key={preset.id} type="button" role="tab" aria-selected={selected.id === preset.id} title={preset.description} className={selected.id === preset.id ? "active" : ""} onClick={() => onProvider(preset.id)}>
+     <span className="provider-mark">{preset.mark}</span><span className="provider-tab-name">{preset.name}</span>
+    </button>)}
    </div>
-   <label className="field"><span>Connection name <small>Optional</small></span><input autoFocus value={name} onChange={event => onName(event.target.value)} maxLength={64} placeholder={provider === "opencode-zen" ? "OpenCode Zen" : "My API"} /></label>
-   {provider === "custom" && <label className="field"><span>API base URL</span><input type="url" value={baseUrl} onChange={event => onBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label>}
+   <div className="provider-summary">
+    <span className="provider-mark large">{selected.mark}</span>
+    <div><b>{selected.name}</b><small>{selected.description}</small></div>
+   </div>
+   <label className="field"><span>Connection name <small>Optional</small></span><input autoFocus value={name} onChange={event => onName(event.target.value)} maxLength={64} placeholder={selected.name} /></label>
+   {!isZen && <label className="field"><span>API base URL <small>{isCustom ? "Required" : "Pre-filled from provider docs"}</small></span><input type="url" value={baseUrl} onChange={event => onBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label>}
    <label className="field"><span>API key</span><input type="password" value={apiKey} onChange={event => onApiKey(event.target.value)} autoComplete="off" required maxLength={4096} /></label>
-   {provider === "custom" && <label className="field"><span>Model ID <small>Optional</small></span><input value={modelId} onChange={event => onModelId(event.target.value)} maxLength={200} placeholder="provider/model-name" /></label>}
+   {!isZen && <label className="field"><span>Model ID <small>{selected.defaultModelId ? "Default: " + selected.defaultModelId : "Optional"}</small></span><input value={modelId} onChange={event => onModelId(event.target.value)} maxLength={200} placeholder={selected.defaultModelId || "provider/model-name"} /></label>}
    <div className="modal-actions">
     <button type="button" className="btn btn-secondary" onClick={onClose} disabled={busy}>Cancel</button>
-    <button className="btn btn-primary" disabled={busy || !apiKey.trim()}>{busy ? "Saving…" : "Save connection"}</button>
+    <button className="btn btn-primary" disabled={busy || !apiKey.trim() || (!isZen && !baseUrl.trim())}>{busy ? "Saving…" : "Save connection"}</button>
    </div>
-   <p className="footnote">Provider usage and billing are managed by your provider.</p>
+   <p className="footnote">Provider usage and billing are managed by your provider. Named providers are saved as OpenAI-compatible connections, so you can edit the endpoint later.</p>
   </form>
  </Overlay>;
 }

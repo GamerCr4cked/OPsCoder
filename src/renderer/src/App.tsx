@@ -5,6 +5,7 @@ import { AddConnectionModal, ApprovalModal, ConfirmModal, RenameChatModal, Renam
 import { Sidebar } from "./components/Sidebar";
 import SettingsView from "./components/SettingsView";
 import { loadProfile, saveProfile, type UserProfile } from "./profile";
+import { providerById, providerForConnection } from "./providers";
 import { loadTheme, saveTheme, type ThemeSettings } from "./theme";
 import type { CliActivity, Message, Page, SettingsTab } from "./types";
 
@@ -25,7 +26,7 @@ export default function App() {
  const [manualModel, setManualModel] = useState("");
  const [showAdd, setShowAdd] = useState(false);
  const [busy, setBusy] = useState(false);
- const [provider, setProvider] = useState<"opencode-zen" | "custom">("opencode-zen");
+ const [providerTab, setProviderTab] = useState("opencode-zen");
  const [name, setName] = useState("");
  const [apiKey, setApiKey] = useState("");
  const [baseUrl, setBaseUrl] = useState("");
@@ -320,36 +321,47 @@ export default function App() {
   catch (caught) { setError(caught instanceof Error ? caught.message : "Could not send the approval decision."); }
  }, [approval, refreshCliStatus]);
 
+ const resetAddDraft = () => {
+  const preset = providerById("opencode-zen");
+  setProviderTab(preset.id);
+  setApiKey("");
+  setName("");
+  setBaseUrl(preset.baseUrl);
+  setModelId(preset.defaultModelId);
+ };
+
+ const openAdd = () => {
+  resetAddDraft();
+  setShowAdd(true);
+ };
+
  const closeAdd = () => {
   if (busy) return;
   setShowAdd(false);
-  setApiKey("");
-  setName("");
-  setBaseUrl("");
-  setModelId("");
-  setProvider("opencode-zen");
+  resetAddDraft();
  };
 
- const handleAddPreset = (preset: { name: string; provider: "opencode-zen" | "custom"; baseUrl?: string; defaultModelId?: string }) => {
-  setName(preset.name);
-  setProvider(preset.provider);
-  setBaseUrl(preset.baseUrl || "");
-  setModelId(preset.defaultModelId || "");
-  setShowAdd(true);
+ const selectProvider = (id: string) => {
+  const next = providerById(id);
+  setProviderTab(next.id);
+  setBaseUrl(next.baseUrl);
+  setModelId(next.defaultModelId);
  };
 
  const addConnection = async () => {
   setBusy(true);
   setError("");
   try {
-   const matches = connections.filter(connection => connection.provider === provider);
-   const prefix = provider === "opencode-zen" ? "OpenCode Zen" : "Custom";
+   const preset = providerById(providerTab);
+   const isZen = preset.provider === "opencode-zen";
+   const matches = connections.filter(connection => providerForConnection(connection).id === preset.id);
+   const fallbackName = matches.length ? preset.name + " " + (matches.length + 1) : preset.name;
    const item = await window.opscoder.connections.add({
-    provider,
-    name: name.trim() || (matches.length ? prefix + " " + (matches.length + 1) : prefix),
+    provider: preset.provider,
+    name: name.trim() || fallbackName,
     apiKey,
-    baseUrl: provider === "custom" ? baseUrl.trim() : undefined,
-    protocol: provider === "opencode-zen" ? "opencode-zen" : "openai-chat-completions",
+    baseUrl: isZen ? undefined : baseUrl.trim(),
+    protocol: preset.protocol,
     modelId: modelId.trim() || undefined
    });
    setConnections(current => [...current, item]);
@@ -359,7 +371,7 @@ export default function App() {
    setName("");
    setBaseUrl("");
    setModelId("");
-   setProvider("opencode-zen");
+   setProviderTab("opencode-zen");
    setSettingsTab("connections");
    setPage("settings");
   } catch (caught) { setError(caught instanceof Error ? caught.message : "Could not save the connection."); }
@@ -518,8 +530,7 @@ export default function App() {
     connections={connections}
     activeId={activeId}
     onSetActive={setActiveId}
-    onAddConnection={() => setShowAdd(true)}
-    onAddPreset={handleAddPreset}
+    onAddConnection={openAdd}
     onRenameConnection={connection => { setRenamingConnection(connection); setRenameConnectionValue(connection.name); }}
     onRemoveConnection={connection => setConfirm({ kind: "connection", connection })}
     onUseConnection={id => { setActiveId(id); setPage("chat"); }}
@@ -533,7 +544,7 @@ export default function App() {
    />}
   </main>
 
-  {showAdd && <AddConnectionModal busy={busy} provider={provider} name={name} apiKey={apiKey} baseUrl={baseUrl} modelId={modelId} onProvider={setProvider} onName={setName} onApiKey={setApiKey} onBaseUrl={setBaseUrl} onModelId={setModelId} onClose={closeAdd} onSubmit={() => void addConnection()} />}
+  {showAdd && <AddConnectionModal busy={busy} providerId={providerTab} name={name} apiKey={apiKey} baseUrl={baseUrl} modelId={modelId} onProvider={selectProvider} onName={setName} onApiKey={setApiKey} onBaseUrl={setBaseUrl} onModelId={setModelId} onClose={closeAdd} onSubmit={() => void addConnection()} />}
   {renamingConnection && <RenameConnectionModal title={renamingConnection.name} value={renameConnectionValue} onChange={setRenameConnectionValue} onClose={() => setRenamingConnection(null)} onSubmit={() => void submitRenameConnection()} />}
   {renamingChat && <RenameChatModal value={renameChatValue} onChange={setRenameChatValue} onClose={() => setRenamingChat(null)} onSubmit={() => void submitRenameChat()} />}
   {confirm && <ConfirmModal title={confirm.kind === "chat" ? "Delete this chat?" : "Remove this connection?"} message={confirm.kind === "chat" ? "“" + confirm.chat.title + "” and its messages will be permanently deleted." : "“" + confirm.connection.name + "” and its saved API key will be removed. Your chats stay."} confirmLabel={confirm.kind === "chat" ? "Delete chat" : "Remove connection"} busyLabel={confirm.kind === "chat" ? "Deleting…" : "Removing…"} busy={confirmBusy} onClose={() => setConfirm(null)} onConfirm={() => void runConfirm()} />}
